@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>Scratchpad</title>
+<script>
+  (function () {
+    var prefs = window.bootPrefs || {};
+    var root = document.documentElement;
+    root.dataset.theme = prefs.theme === 'dark' ? 'dark' : 'light';
+    if (prefs.fontUI) root.style.setProperty('--font-ui', prefs.fontUI);
+    if (prefs.fontText) root.style.setProperty('--font-text', prefs.fontText);
+    if (prefs.fontHeading) root.style.setProperty('--font-heading', prefs.fontHeading);
+    if (prefs.fontCode) root.style.setProperty('--font-code', prefs.fontCode);
+    if (prefs.fontSizeUi) root.style.setProperty('--font-size-ui', prefs.fontSizeUi + 'px');
+    if (prefs.fontSizeText) root.style.setProperty('--font-size-text', prefs.fontSizeText + 'px');
+    if (prefs.fontSizeHeading) root.style.setProperty('--font-size-heading', prefs.fontSizeHeading + 'px');
+    if (prefs.fontSizeCode) root.style.setProperty('--font-size-code', prefs.fontSizeCode + 'px');
+  })();
+</script>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="app">
+    <header id="topbar">
+      <div class="document-identity">
+        <img id="fileTypeIcon" class="file-type-icon" alt="">
+        <input id="filename" type="text" value="Untitled" spellcheck="false" autocomplete="off">
+      </div>
+      <div class="topbar-controls">
+        <select id="modeSelect" class="pill" title="Content mode">
+          <option value="text">Text</option>
+          <option value="markdown">Markdown</option>
+          <option value="bbcode">BBCode</option>
+        </select>
+        <select id="viewSelect" title="Preview mode">
+          <option value="edit">Edit</option>
+          <option value="live">Live Preview</option>
+          <option value="preview">Preview</option>
+        </select>
+        <span class="divider"></span>
+        <button id="openBtn">Open</button>
+        <button id="saveBtn">Save</button>
+        <button id="saveAsBtn">Save As</button>
+        <div id="settingsGroup" class="control-group">
+          <button id="settingsBtn" title="Settings" aria-label="Settings">&#9881;</button>
+          <div id="settingsPanel" class="hidden">
+            <div class="settings-heading">Settings</div>
+            <div class="settings-row">
+              <span class="settings-label">Theme</span>
+              <div class="settings-theme-toggle" role="group" aria-label="Theme">
+                <button type="button" id="themeLightBtn" class="pill">&#9788; Light</button>
+                <button type="button" id="themeDarkBtn" class="pill">&#9789; Dark</button>
+              </div>
+            </div>
+            <label class="settings-row">
+              <span class="settings-label">UI font</span>
+              <div class="settings-font-controls">
+                <select id="fontUiSelect">
+                  <option value="Verdana, Geneva, sans-serif">Verdana</option>
+                  <option value="Arial, Helvetica, sans-serif">Arial</option>
+                  <option value="'Segoe UI', Tahoma, sans-serif">Segoe UI</option>
+                  <option value="Tahoma, Geneva, sans-serif">Tahoma</option>
+                  <option value="'Trebuchet MS', sans-serif">Trebuchet MS</option>
+                  <option value="Georgia, 'Times New Roman', serif">Georgia</option>
+                  <option value="Calibri, Candara, sans-serif">Calibri</option>
+                </select>
+                <input type="number" id="fontUiSizeInput" class="font-size-input" min="6" max="96" step="1" title="UI font size (px)" aria-label="UI font size">
+              </div>
+            </label>
+            <label class="settings-row">
+              <span class="settings-label">Text font</span>
+              <div class="settings-font-controls">
+                <select id="fontTextSelect">
+                  <option value="Verdana, Geneva, sans-serif">Verdana</option>
+                  <option value="Arial, Helvetica, sans-serif">Arial</option>
+                  <option value="'Segoe UI', Tahoma, sans-serif">Segoe UI</option>
+                  <option value="Tahoma, Geneva, sans-serif">Tahoma</option>
+                  <option value="'Trebuchet MS', sans-serif">Trebuchet MS</option>
+                  <option value="Georgia, 'Times New Roman', serif">Georgia</option>
+                  <option value="Calibri, Candara, sans-serif">Calibri</option>
+                </select>
+                <input type="number" id="fontTextSizeInput" class="font-size-input" min="6" max="96" step="1" title="Text font size (px)" aria-label="Text font size">
+              </div>
+            </label>
+            <label class="settings-row">
+              <span class="settings-label">Heading font</span>
+              <div class="settings-font-controls">
+                <select id="fontHeadingSelect">
+                  <option value="'Times New Roman', Times, serif">Times New Roman</option>
+                  <option value="Georgia, 'Times New Roman', serif">Georgia</option>
+                  <option value="Garamond, 'Times New Roman', serif">Garamond</option>
+                  <option value="'Palatino Linotype', 'Book Antiqua', Palatino, serif">Palatino</option>
+                  <option value="'Segoe UI', Tahoma, sans-serif">Segoe UI</option>
+                  <option value="Verdana, Geneva, sans-serif">Verdana</option>
+                  <option value="'Trebuchet MS', sans-serif">Trebuchet MS</option>
+                </select>
+                <input type="number" id="fontHeadingSizeInput" class="font-size-input" min="6" max="96" step="1" title="Heading font size (px)" aria-label="Heading font size">
+              </div>
+            </label>
+            <label class="settings-row">
+              <span class="settings-label">Code font</span>
+              <div class="settings-font-controls">
+                <select id="fontCodeSelect">
+                  <option value="'Courier New', monospace">Courier New</option>
+                  <option value="Consolas, 'Courier New', monospace">Consolas</option>
+                  <option value="'Lucida Console', Monaco, monospace">Lucida Console</option>
+                  <option value="Monaco, Consolas, monospace">Monaco</option>
+                  <option value="'Cascadia Code', Consolas, monospace">Cascadia Code</option>
+                  <option value="Menlo, Consolas, monospace">Menlo</option>
+                </select>
+                <input type="number" id="fontCodeSizeInput" class="font-size-input" min="6" max="96" step="1" title="Code font size (px)" aria-label="Code font size">
+              </div>
+            </label>
+            <label class="settings-row">
+              <span class="settings-label">Default view</span>
+              <select id="defaultViewSelect">
+                <option value="edit">Edit</option>
+                <option value="live">Live Preview</option>
+                <option value="preview">Preview</option>
+              </select>
+            </label>
+          </div>
+        </div>
+      </div>
+      <div class="window-controls" aria-label="Window controls">
+        <button id="minimizeBtn" title="Minimize" aria-label="Minimize">&#8722;</button>
+        <button id="maximizeBtn" title="Maximize" aria-label="Maximize">&#9633;</button>
+        <button id="closeBtn" class="close-window" title="Close" aria-label="Close">&#10005;</button>
+      </div>
+    </header>
+
+
+    <main id="editorWrap">
+      <div id="editor" contenteditable="true" spellcheck="true"></div>
+    </main>
+
+    <footer id="statusbar">
+      <div id="counts">0 words &middot; 0 characters</div>
+      <div id="spellArea">
+        <div id="shortcodesGroup" class="control-group">
+          <button id="shortcodesBtn" title="Manage shortcodes">Shortcuts &#9662;</button>
+          <div id="shortcodesPanel" class="hidden">
+            <div class="spell-note">Type a shortcode, then a space or punctuation, to expand it.</div>
+            <form id="shortcodeForm" class="shortcode-form">
+              <input id="shortcodeKeyInput" type="text" placeholder="Shortcode" autocomplete="off" spellcheck="false" maxlength="40">
+              <textarea id="shortcodeExpansionInput" placeholder="Expands to…" rows="2" spellcheck="false"></textarea>
+              <div class="shortcode-form-actions">
+                <button type="button" id="shortcodeCancelBtn" class="pill hidden">Cancel</button>
+                <button type="submit" id="shortcodeSaveBtn">Add</button>
+              </div>
+              <div id="shortcodeFormError" class="shortcode-form-error hidden"></div>
+            </form>
+            <div id="shortcodeList" class="shortcode-list"></div>
+          </div>
+        </div>
+        <button id="spellBtn">Spellcheck: On &#9662;</button>
+        <div id="spellPanel" class="hidden">
+          <label class="spell-toggle-row">
+            <input type="checkbox" id="spellToggle" checked> Check spelling
+          </label>
+          <input id="langSearch" class="lang-search" type="text" placeholder="Search dictionaries…" autocomplete="off" spellcheck="false">
+          <div id="langList"></div>
+        </div>
+        <div id="spellContextMenu" class="spell-context-menu hidden" role="menu"></div>
+        <div id="synonymsContextMenu" class="spell-context-menu hidden" role="menu"></div>
+      </div>
+    </footer>
+  </div>
+
+  <div id="confirmOverlay" class="modal-overlay hidden">
+    <div id="confirmBox" class="modal-box" role="alertdialog" aria-modal="true" aria-labelledby="confirmMessage">
+      <p id="confirmMessage"></p>
+      <div class="modal-actions">
+        <button id="confirmCancelBtn" class="pill">Cancel</button>
+        <button id="confirmOkBtn" class="pill danger">Discard changes</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="scratchblocks.js"></script>
+  <script src="../node_modules/@mermaid-js/tiny/dist/mermaid.tiny.js"></script>
+  <script src="mermaid.js"></script>
+  <script src="codehighlight.js"></script>
+  <script src="markdown.js"></script>
+  <script src="bbcode.js"></script>
+  <script src="editor.js"></script>
+  <script src="spellcheck.js"></script>
+  <script src="shortcodes.js"></script>
+  <script src="synonyms.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

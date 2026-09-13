@@ -1,0 +1,57 @@
+{
+  "name": "scratchpad-editor",
+  "version": "1.0.0",
+  "description": "A minimalist custom notepad with markdown and bbcode support.",
+  "main": "main.js",
+  "engines": {
+    "node": "26.3.1"
+  },
+  "scripts": {
+    "start": "electron .",
+    "prepare-icons": "node scripts/prepare-icons.js",
+    "dist": "npm run prepare-icons && electron-builder --win --x64"
+  },
+  "dependencies": {
+    "@mermaid-js/tiny": "12.0.0",
+    "scratchblocks": "3.7.1"
+  },
+  "build": {
+    "appId": "com.scratchpad.editor",
+    "productName": "Scratchpad",
+    "icon": "build/icons/app.png",
+    "win": {
+      "target": "nsis",
+      "icon": "build/icons/app.png"
+    },
+    "fileAssociations": [
+      {
+        "name": "Scratchpad document",
+        "ext": [
+          "txt"
+        ],
+        "icon": "build/icons/txt.ico"
+      },
+      {
+        "name": "Scratchpad Markdown document",
+        "ext": [
+          "md",
+          "markdown"
+        ],
+        "icon": "build/icons/md.ico"
+      },
+      {
+        "name": "Scratchpad BBCode document",
+        "ext": [
+          "bbcode",
+          "bb",
+          "scratch"
+        ],
+        "icon": "build/icons/bb.ico"
+      }
+    ]
+  },
+  "devDependencies": {
+    "electron": "^44.3.0",
+    "electron-builder": "^26.15.3"
+  }
+}
