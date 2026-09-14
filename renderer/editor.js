@@ -16,6 +16,7 @@
 
   let editorEl = null;
   let isComposing = false;
+  let forcePlainPaste = false;
 
   let undoStack = [];
   let redoStack = [];
@@ -119,14 +120,29 @@
     return sel && sel.rangeCount ? getClosestLine(sel.getRangeAt(0).startContainer) : null;
   }
 
-  const LIVE_PREVIEW_HOLDER_SELECTOR = '.scratchblocks-live-preview, .mermaid-live-preview';
+  const LIVE_PREVIEW_HOLDER_SELECTOR = '.scratchblocks-live-preview, .mermaid-live-preview, .katex-live-preview';
+  const MATH_INLINE_SELECTOR = '.md-math-inline';
+  const CANONICALIZE_SELECTOR = `${LIVE_PREVIEW_HOLDER_SELECTOR}, ${MATH_INLINE_SELECTOR}`;
+
+  function canonicalizeFragment(root) {
+    root.querySelectorAll(LIVE_PREVIEW_HOLDER_SELECTOR).forEach((el) => el.remove());
+    root.querySelectorAll(MATH_INLINE_SELECTOR).forEach((el) => {
+      let raw = '';
+      try {
+        raw = decodeURIComponent(el.getAttribute('data-raw') || '');
+      } catch (_err) {
+        raw = '';
+      }
+      el.replaceWith(document.createTextNode(raw));
+    });
+    return root.textContent || '';
+  }
+
   function readLineText(lineEl) {
     let text = lineEl.textContent || '';
-    const holder = lineEl.querySelector(LIVE_PREVIEW_HOLDER_SELECTOR);
-    if (holder) {
+    if (lineEl.querySelector(CANONICALIZE_SELECTOR)) {
       const clone = lineEl.cloneNode(true);
-      clone.querySelectorAll(LIVE_PREVIEW_HOLDER_SELECTOR).forEach((el) => el.remove());
-      text = clone.textContent || '';
+      text = canonicalizeFragment(clone);
     }
     if (/^\u00a0+$/.test(text)) return '';
     return text.replace(/\u00a0/g, ' ');
@@ -141,14 +157,18 @@
     const preRange = document.createRange();
     preRange.selectNodeContents(lineEl);
     preRange.setEnd(range.startContainer, range.startOffset);
-    return Math.min(preRange.toString().length, maxLen);
+    const fragment = preRange.cloneContents();
+    const text = canonicalizeFragment(fragment).replace(/\u00a0/g, ' ');
+    return Math.min(text.length, maxLen);
   }
 
   function getOffsetAtBoundary(lineEl, container, offset) {
     const range = document.createRange();
     range.selectNodeContents(lineEl);
     range.setEnd(container, offset);
-    return Math.min(range.toString().length, readLineText(lineEl).length);
+    const fragment = range.cloneContents();
+    const text = canonicalizeFragment(fragment).replace(/\u00a0/g, ' ');
+    return Math.min(text.length, readLineText(lineEl).length);
   }
 
   function deleteSelectedLines(range) {
@@ -187,19 +207,59 @@
 
   function findTextPosition(container, offset) {
     let remaining = Math.max(0, offset);
-    const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT);
-    let node = walker.nextNode();
-    let last = null;
+    let result = null;
+    let endPosition = null;
 
-    while (node) {
-      const len = node.textContent.length;
-      if (remaining <= len) return { node, offset: remaining };
-      remaining -= len;
-      last = node;
-      node = walker.nextNode();
+    function indexOfChild(el) {
+      return Array.prototype.indexOf.call(el.parentNode.childNodes, el);
+    }
+    function boundaryBefore(el) {
+      return { node: el.parentNode, offset: indexOfChild(el) };
+    }
+    function boundaryAfter(el) {
+      return { node: el.parentNode, offset: indexOfChild(el) + 1 };
     }
 
-    if (last) return { node: last, offset: last.textContent.length };
+    function walk(node) {
+      if (result) return;
+      if (node.nodeType === Node.ELEMENT_NODE && node.matches && node.matches(CANONICALIZE_SELECTOR)) {
+        if (node.matches(MATH_INLINE_SELECTOR)) {
+          let raw = '';
+          try {
+            raw = decodeURIComponent(node.getAttribute('data-raw') || '');
+          } catch (_err) {
+            raw = '';
+          }
+          const len = raw.length;
+          if (remaining <= 0) {
+            result = boundaryBefore(node);
+            return;
+          }
+          if (remaining < len) {
+            result = boundaryAfter(node);
+            return;
+          }
+          remaining -= len;
+          endPosition = boundaryAfter(node);
+        }
+        return;
+      }
+      if (node.nodeType === Node.TEXT_NODE) {
+        const len = node.textContent.length;
+        if (remaining <= len) {
+          result = { node, offset: remaining };
+          return;
+        }
+        remaining -= len;
+        endPosition = { node, offset: len };
+        return;
+      }
+      Array.from(node.childNodes).forEach(walk);
+    }
+
+    walk(container);
+    if (result) return result;
+    if (endPosition) return endPosition;
 
     const textNode = document.createTextNode('');
     container.appendChild(textNode);
@@ -211,9 +271,10 @@
     if (!lineEl) return;
     const pos = findTextPosition(lineEl, offset);
     const range = document.createRange();
-    const safeOffset = Math.min(pos.offset, pos.node.textContent.length);
+    const maxOffset = pos.node.nodeType === Node.TEXT_NODE ? pos.node.textContent.length : pos.node.childNodes.length;
+    const safeOffset = Math.min(Math.max(0, pos.offset), maxOffset);
 
-    range.setStart(pos.node, Math.max(0, safeOffset));
+    range.setStart(pos.node, safeOffset);
     range.collapse(true);
 
     const sel = window.getSelection();
@@ -280,6 +341,22 @@
         pre.textContent = mermaidFence.source;
         div.appendChild(pre);
         div.classList.add('mermaid-preview-line');
+        div.contentEditable = 'false';
+        return;
+      }
+
+      const mathFence = findMarkdownMathFenceContaining(index);
+      if (mathFence) {
+        if (mathFence.start !== index) {
+          div.hidden = true;
+          div.contentEditable = 'false';
+          return;
+        }
+        const pre = document.createElement('pre');
+        pre.className = 'katex-source';
+        pre.textContent = mathFence.source;
+        div.appendChild(pre);
+        div.classList.add('katex-preview-line');
         div.contentEditable = 'false';
         return;
       }
@@ -363,6 +440,18 @@
         holder.appendChild(pre);
         div.appendChild(holder);
       }
+
+      const liveMath = findMarkdownMathFenceContaining(index);
+      if (liveMath && liveMath.end === index) {
+        const holder = document.createElement('div');
+        holder.className = 'katex-live-preview';
+        holder.contentEditable = 'false';
+        const pre = document.createElement('pre');
+        pre.className = 'katex-source';
+        pre.textContent = liveMath.source;
+        holder.appendChild(pre);
+        div.appendChild(holder);
+      }
     }
   }
 
@@ -390,6 +479,35 @@
     if (state.mode !== 'markdown') return null;
     for (let start = 0; start <= index; start += 1) {
       const fence = getMarkdownMermaidFence(start);
+      if (fence && fence.end >= index && index >= fence.start) return fence;
+    }
+    return null;
+  }
+
+  const MATH_FENCE_BACKTICK_RE = /^\s*```\s*math\s*$/i;
+  const MATH_FENCE_DOLLAR_RE = /^\s*\$\$\$\s*$/;
+
+  function isMathFenceOpen(raw) {
+    return MATH_FENCE_BACKTICK_RE.test(raw || '') || MATH_FENCE_DOLLAR_RE.test(raw || '');
+  }
+
+  function getMarkdownMathFence(openIndex) {
+    const openLine = state.lines[openIndex];
+    if (state.mode !== 'markdown' || !isMathFenceOpen(openLine)) return null;
+    const usesDollarFence = MATH_FENCE_DOLLAR_RE.test(openLine || '');
+    const closeRe = usesDollarFence ? MATH_FENCE_DOLLAR_RE : /^\s*```/;
+    for (let end = openIndex + 1; end < state.lines.length; end += 1) {
+      if (closeRe.test(state.lines[end])) {
+        return { start: openIndex, end, source: state.lines.slice(openIndex + 1, end).join('\n') };
+      }
+    }
+    return null;
+  }
+
+  function findMarkdownMathFenceContaining(index) {
+    if (state.mode !== 'markdown') return null;
+    for (let start = 0; start <= index; start += 1) {
+      const fence = getMarkdownMathFence(start);
       if (fence && fence.end >= index && index >= fence.start) return fence;
     }
     return null;
@@ -492,6 +610,19 @@
     }
   }
 
+  function renderMathPreviews(generation) {
+    if (state.mode !== 'markdown' || state.view === 'edit' || !window.MathRenderer || !window.MathRenderer.isAvailable()) return;
+    document.querySelectorAll('#editor pre.katex-source').forEach((pre) => {
+      if (generation !== previewGeneration || !pre.isConnected) return;
+      const rendered = window.MathRenderer.renderBlock(pre.textContent);
+      if (!rendered) return;
+      const diagram = document.createElement('div');
+      diagram.className = 'katex-diagram';
+      diagram.innerHTML = rendered;
+      pre.replaceWith(diagram);
+    });
+  }
+
   function schedulePreviewRender() {
     previewGeneration += 1;
     if (previewRenderScheduled) return;
@@ -501,6 +632,7 @@
       const generation = previewGeneration;
       renderScratchblocksPreviews(generation);
       renderMermaidPreviews(generation);
+      renderMathPreviews(generation);
     });
   }
 
@@ -533,7 +665,7 @@
       state.lines.some((line) => /\[\/?scratchblocks/i.test(line));
 
     const mightAffectMarkdownFence = state.mode === 'markdown' && state.view !== 'edit' &&
-      state.lines.some((line) => /^\s*```/.test(line));
+      state.lines.some((line) => /^\s*```/.test(line) || MATH_FENCE_DOLLAR_RE.test(line));
 
     if (mightAffectScratchblocks || mightAffectMarkdownFence) {
       refreshAllLines();
@@ -794,6 +926,11 @@
         return;
       }
 
+      if (isMod && event.shiftKey && event.key.toLowerCase() === 'v') {
+        forcePlainPaste = true;
+        return;
+      }
+
       if (state.view === 'preview') {
         event.preventDefault();
         return;
@@ -972,7 +1109,13 @@
       if (state.view === 'preview') return;
       event.preventDefault();
       pushUndoSnapshot(true);
-      const text = (event.clipboardData || window.clipboardData).getData('text/plain');
+      const clipboard = event.clipboardData || window.clipboardData;
+      const plainText = clipboard.getData('text/plain');
+      const html = clipboard.getData('text/html');
+      const usePlain = forcePlainPaste || !html || !window.PasteConvert;
+      forcePlainPaste = false;
+      const converted = usePlain ? null : window.PasteConvert.convert(html, state.mode);
+      const text = converted != null ? converted : plainText;
       const sel = window.getSelection();
       const lineEl = getClosestLine(sel.anchorNode);
       if (!lineEl) return;
@@ -1012,6 +1155,7 @@
     },
     isDirty: () => state.dirty,
     markSaved() { setDirty(false); },
+    forceDirty() { setDirty(true); },
     setMode(mode) {
       if (state.view !== 'preview') syncActiveLineFromDOM();
       const caret = currentCaret();
@@ -1045,4 +1189,5 @@
 
   window.addEventListener('scratchblocks:ready', schedulePreviewRender);
   window.addEventListener('mermaid:ready', schedulePreviewRender);
+  window.addEventListener('katex:ready', schedulePreviewRender);
 })();

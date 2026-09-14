@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 function readBootPrefs() {
   const marker = '--boot-prefs=';
@@ -13,6 +13,8 @@ function readBootPrefs() {
 contextBridge.exposeInMainWorld('bootPrefs', readBootPrefs());
 
 contextBridge.exposeInMainWorld('api', {
+  windowId: ipcRenderer.sendSync('window:id'),
+  getWindowBounds: () => ipcRenderer.sendSync('window:bounds'),
   openFile: () => ipcRenderer.invoke('dialog:open'),
   saveFile: (payload) => ipcRenderer.invoke('file:save', payload),
   saveFileAs: (payload) => ipcRenderer.invoke('dialog:saveAs', payload),
@@ -22,12 +24,27 @@ contextBridge.exposeInMainWorld('api', {
   setFontPreference: (key, value) => ipcRenderer.invoke('preferences:set-font', { key, value }),
   setFontSizePreference: (key, value) => ipcRenderer.invoke('preferences:set-font-size', { key, value }),
   setDefaultViewPreference: (view) => ipcRenderer.invoke('preferences:set-default-view', view),
+  setTabsEnabledPreference: (enabled) => ipcRenderer.invoke('preferences:set-tabs-enabled', enabled),
+  resetPreferences: () => ipcRenderer.invoke('preferences:reset'),
+  saveSession: (payload) => ipcRenderer.invoke('session:save', payload),
+  clearSession: () => ipcRenderer.send('session:clear'),
+  onSessionRestore: (callback) => ipcRenderer.on('session:restore', (_event, data) => callback(data)),
   minimizeWindow: () => ipcRenderer.send('window:minimize'),
   toggleMaximizeWindow: () => ipcRenderer.send('window:toggle-maximize'),
   closeWindow: () => ipcRenderer.send('window:close'),
-  respondToWindowClose: (shouldClose) => ipcRenderer.send('window:close-response', shouldClose),
+  respondToWindowClose: (shouldClose, keepDraft) => ipcRenderer.send('window:close-response', shouldClose, keepDraft),
   onWindowCloseRequest: (callback) => ipcRenderer.on('window:request-close', () => callback()),
   onFileOpen: (callback) => ipcRenderer.on('file:open-path', (_event, data) => callback(data)),
+  getPathForFile: (file) => webUtils.getPathForFile(file),
+  openDroppedFiles: (filePaths) => ipcRenderer.send('file:open-dropped', filePaths),
+  onTabShortcut: (callback) => ipcRenderer.on('tab:shortcut', (_event, shortcut) => callback(shortcut)),
+  tabDragStart: (payload) => ipcRenderer.send('tab:drag-start', payload),
+  tabDragMove: (payload) => ipcRenderer.send('tab:drag-move', payload),
+  tabDragEnd: (payload) => ipcRenderer.send('tab:drag-end', payload),
+  onTabDragState: (callback) => ipcRenderer.on('tab:drag-state', (_event, data) => callback(data)),
+  onTabDropReorder: (callback) => ipcRenderer.on('tab:drop-reorder', (_event, data) => callback(data)),
+  onTabTransferRemove: (callback) => ipcRenderer.on('tab:transfer-remove', (_event, data) => callback(data)),
+  onTabAcceptTransfer: (callback) => ipcRenderer.on('tab:accept-transfer', (_event, data) => callback(data)),
 
   getSpellcheckAvailable: () => ipcRenderer.invoke('spellcheck:get-available'),
   getSpellcheckEnabled: () => ipcRenderer.invoke('spellcheck:get-enabled'),

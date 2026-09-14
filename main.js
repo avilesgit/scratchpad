@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, Menu, session } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, session, screen } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
@@ -9,6 +9,45 @@ let pendingFilePath = null;
 
 const ICONS_DIRECTORY = path.join(__dirname, 'assets', 'icons');
 const FALLBACK_ICON = path.join(__dirname, 'icon_256.png');
+const sessionIdForWindow = new WeakMap();
+const tabDragStates = new WeakMap();
+
+function sessionsDirectory() { return path.join(app.getPath('userData'), '.sessions'); }
+function ensureSessionsDirectory() {
+  try { fs.mkdirSync(sessionsDirectory(), { recursive: true }); } catch (_err) { /* already exists */ }
+}
+function sessionFilePath(id) { return path.join(sessionsDirectory(), `${id}.json`); }
+function createSessionId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`; }
+function writeSessionFile(id, data) {
+  ensureSessionsDirectory();
+  try { fs.writeFileSync(sessionFilePath(id), JSON.stringify(data), 'utf8'); } catch (_err) { /* best effort */ }
+}
+function deleteSessionFile(id) {
+  try { fs.unlinkSync(sessionFilePath(id)); } catch (_err) { /* nothing to remove */ }
+}
+function readSessionFiles() {
+  ensureSessionsDirectory();
+  let entries = [];
+  try { entries = fs.readdirSync(sessionsDirectory()); } catch (_err) { entries = []; }
+  return entries
+    .filter((name) => name.endsWith('.json'))
+    .map((name) => {
+      try {
+        return { id: name.slice(0, -5), data: JSON.parse(fs.readFileSync(path.join(sessionsDirectory(), name), 'utf8')) };
+      } catch (_err) {
+        return null;
+      }
+    })
+    .filter(Boolean);
+}
+function sessionIdFor(win) {
+  let id = sessionIdForWindow.get(win);
+  if (!id) {
+    id = createSessionId();
+    sessionIdForWindow.set(win, id);
+  }
+  return id;
+}
 
 function readIconConfiguration() {
   try {
@@ -79,7 +118,8 @@ function bootPreferences() {
     fontSizeText: sanitizedFontSize(preferences.fontSizeText, DEFAULT_FONT_SIZES.fontSizeText),
     fontSizeHeading: sanitizedFontSize(preferences.fontSizeHeading, DEFAULT_FONT_SIZES.fontSizeHeading),
     fontSizeCode: sanitizedFontSize(preferences.fontSizeCode, DEFAULT_FONT_SIZES.fontSizeCode),
-    defaultView: ['edit', 'live', 'preview'].includes(preferences.defaultView) ? preferences.defaultView : 'edit'
+    defaultView: ['edit', 'live', 'preview'].includes(preferences.defaultView) ? preferences.defaultView : 'edit',
+    tabsEnabled: preferences.tabsEnabled === true
   };
 }
 
@@ -162,7 +202,7 @@ function wireSharedSpellcheckSession() {
   ses.on('spellcheck-dictionary-initialized', (_event, lang) => broadcast('spellcheck:download-status', { lang, status: 'success' }));
 }
 
-function createWindow(filePath) {
+function createWindow(filePath, restoredSession, initialTab) {
   const savedBounds = readWindowBounds();
   const boot = bootPreferences();
   const win = new BrowserWindow({
@@ -187,6 +227,7 @@ function createWindow(filePath) {
   });
   windows.add(win);
   allowCloseFlags.set(win, false);
+  sessionIdForWindow.set(win, restoredSession ? restoredSession.id : createSessionId());
   if (savedBounds?.isMaximized) win.maximize();
   win.once('ready-to-show', () => win.show());
 
@@ -200,6 +241,8 @@ function createWindow(filePath) {
 
   win.loadFile(path.join(__dirname, 'renderer', 'index.html'));
   win.webContents.once('did-finish-load', () => {
+    if (restoredSession) win.webContents.send('session:restore', restoredSession.data);
+    if (initialTab) win.webContents.send('tab:accept-transfer', { tab: initialTab.tab, sourceWindowId: initialTab.sourceWindowId, detached: initialTab.detached === true });
     if (filePath) sendFileToRenderer(win, filePath);
   });
 
@@ -207,7 +250,12 @@ function createWindow(filePath) {
     const key = input.key.toLowerCase();
     const isMod = input.control || input.meta;
     const isDevToolsShortcut = isMod && input.shift && ['i', 'j', 'c'].includes(key);
-    if (input.key === 'F5' || input.key === 'F12' || isDevToolsShortcut || (isMod && ['n', 'o', 'p', 'q', 'r', 'w'].includes(key))) event.preventDefault();
+    if (isMod && ['t', 'w'].includes(key) && readPreferences().tabsEnabled === true) {
+      event.preventDefault();
+      win.webContents.send('tab:shortcut', input.shift && key === 't' ? 'reopen' : key === 't' ? 'new' : 'close');
+      return;
+    }
+    if (input.key === 'F5' || input.key === 'F12' || isDevToolsShortcut || (isMod && ['n', 'o', 'p', 'q', 'r'].includes(key))) event.preventDefault();
   });
   win.webContents.on('context-menu', (event, params) => {
     if (params.misspelledWord) {
@@ -237,6 +285,9 @@ function createWindow(filePath) {
     saveWindowBounds(win);
     if (allowCloseFlags.get(win)) return;
     event.preventDefault();
+    if (win.isMinimized()) win.restore();
+    win.show();
+    win.focus();
     win.webContents.send('window:request-close');
   });
 
@@ -246,9 +297,37 @@ function createWindow(filePath) {
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null);
   wireSharedSpellcheckSession();
-  createWindow(pendingFilePath);
+  const bootTabsEnabled = bootPreferences().tabsEnabled;
+  let restorable = readSessionFiles().filter((entry) => {
+    if (!entry.data) return false;
+    if (entry.data.restore !== true) return false;
+    if (bootTabsEnabled && Array.isArray(entry.data.tabs) && entry.data.tabs.length) return true;
+    return entry.data.dirty === true;
+  }).sort((a, b) => Number(b.data.savedAt || 0) - Number(a.data.savedAt || 0));
+  const restoredSession = restorable[0] || null;
+  if (restoredSession) {
+    restorable.slice(1).forEach((entry) => deleteSessionFile(entry.id));
+    createWindow(pendingFilePath, restoredSession);
+  } else {
+    createWindow(pendingFilePath);
+  }
   pendingFilePath = null;
 });
+
+function openFileInExistingTabsWindow(filePath) {
+  if (!filePath || readPreferences().tabsEnabled !== true) return false;
+  const target = BrowserWindow.getFocusedWindow() || windows.values().next().value;
+  if (!target || target.isDestroyed()) return false;
+  if (target.isMinimized()) target.restore();
+  target.focus();
+  try {
+    const content = fs.readFileSync(filePath, 'utf8');
+    target.webContents.send('file:open-path', { filePath, content, fileName: path.basename(filePath) });
+    return true;
+  } catch (_err) {
+    return false;
+  }
+}
 
 const singleInstance = app.requestSingleInstanceLock();
 if (!singleInstance) {
@@ -258,7 +337,7 @@ if (!singleInstance) {
   app.on('second-instance', (_event, commandLine) => {
     const filePath = getOpenablePath(commandLine);
     if (filePath) {
-      createWindow(filePath);
+      if (!openFileInExistingTabsWindow(filePath)) createWindow(filePath);
       return;
     }
     const target = BrowserWindow.getFocusedWindow() || windows.values().next().value;
@@ -273,8 +352,9 @@ if (!singleInstance) {
 
 app.on('open-file', (event, filePath) => {
   event.preventDefault();
-  if (app.isReady()) createWindow(filePath);
-  else pendingFilePath = filePath;
+  if (app.isReady()) {
+    if (!openFileInExistingTabsWindow(filePath)) createWindow(filePath);
+  } else pendingFilePath = filePath;
 });
 
 app.on('window-all-closed', () => {
@@ -301,8 +381,27 @@ ipcMain.handle('dialog:open', async (event) => {
     filters: FILE_FILTERS
   });
   if (result.canceled || result.filePaths.length === 0) return null;
-  createWindow(result.filePaths[0]);
+  const filePath = result.filePaths[0];
+  if (readPreferences().tabsEnabled === true) {
+    const content = fs.readFileSync(filePath, 'utf8');
+    return { filePath, content, fileName: path.basename(filePath) };
+  }
+  createWindow(filePath);
   return null;
+});
+
+ipcMain.on('file:open-dropped', (event, filePaths) => {
+  const win = windowFor(event);
+  const paths = Array.isArray(filePaths) ? filePaths.filter((entry) => typeof entry === 'string' && entry) : [];
+  const tabsEnabled = readPreferences().tabsEnabled === true;
+  paths.forEach((filePath) => {
+    if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) return;
+    if (tabsEnabled && win && !win.isDestroyed()) {
+      sendFileToRenderer(win, filePath);
+    } else {
+      createWindow(filePath);
+    }
+  });
 });
 
 ipcMain.handle('file:save', async (event, { filePath, fileName, content }) => {
@@ -383,6 +482,8 @@ ipcMain.handle('spellcheck:remove-custom-word', (_event, candidate) => {
 ipcMain.handle('shortcodes:get', () => readShortcodes());
 ipcMain.handle('shortcodes:set', (_event, list) => writeShortcodes(list));
 
+ipcMain.on('window:id', (event) => { event.returnValue = windowFor(event)?.id || 0; });
+ipcMain.on('window:bounds', (event) => { event.returnValue = windowFor(event)?.getBounds() || null; });
 ipcMain.handle('preferences:get', () => readPreferences());
 ipcMain.handle('icons:get', () => rendererIconUrls());
 ipcMain.handle('preferences:set-theme', (_event, theme) => {
@@ -409,12 +510,149 @@ ipcMain.handle('preferences:set-font-size', (_event, { key, value } = {}) => {
   writePreferences(preferences);
   return preferences;
 });
+ipcMain.handle('preferences:reset', () => {
+  const preferences = {
+    ...readPreferences(),
+    theme: 'light',
+    fontUI: DEFAULT_FONTS.fontUI,
+    fontText: DEFAULT_FONTS.fontText,
+    fontHeading: DEFAULT_FONTS.fontHeading,
+    fontCode: DEFAULT_FONTS.fontCode,
+    fontSizeUi: DEFAULT_FONT_SIZES.fontSizeUi,
+    fontSizeText: DEFAULT_FONT_SIZES.fontSizeText,
+    fontSizeHeading: DEFAULT_FONT_SIZES.fontSizeHeading,
+    fontSizeCode: DEFAULT_FONT_SIZES.fontSizeCode,
+    defaultView: 'edit',
+    tabsEnabled: false,
+  };
+  writePreferences(preferences);
+  return preferences;
+});
+ipcMain.handle('preferences:set-tabs-enabled', (_event, enabled) => {
+  const preferences = { ...readPreferences(), tabsEnabled: enabled === true };
+  writePreferences(preferences);
+  return preferences;
+});
 ipcMain.handle('preferences:set-default-view', (_event, view) => {
   if (!['edit', 'live', 'preview'].includes(view)) return readPreferences();
   const preferences = { ...readPreferences(), defaultView: view };
   writePreferences(preferences);
   return preferences;
 });
+function sendTabDragState(sourceWindow, state) {
+  windows.forEach((win) => {
+    if (!win.isDestroyed()) win.webContents.send('tab:drag-state', state);
+  });
+}
+
+function findWindowAtPoint(point, sourceWindow = null) {
+  if (sourceWindow && !sourceWindow.isDestroyed()) {
+    const sourceBounds = sourceWindow.getBounds();
+    if (point.x >= sourceBounds.x && point.x <= sourceBounds.x + sourceBounds.width &&
+        point.y >= sourceBounds.y && point.y <= sourceBounds.y + sourceBounds.height) {
+      return sourceWindow;
+    }
+  }
+  for (const win of windows) {
+    if (win.isDestroyed() || win === sourceWindow) continue;
+    const bounds = win.getBounds();
+    if (point.x >= bounds.x && point.x <= bounds.x + bounds.width && point.y >= bounds.y && point.y <= bounds.y + bounds.height) return win;
+  }
+  return null;
+}
+
+ipcMain.on('tab:drag-start', (event, payload) => {
+  const win = windowFor(event);
+  if (!win || !payload?.tab) return;
+  tabDragStates.set(win, { tab: payload.tab, index: Number(payload.index), tabCount: Math.max(1, Number(payload.tabCount) || 1) });
+  sendTabDragState(win, { active: true, sourceWindowId: win.id, index: Number(payload.index), x: null, y: null, targetWindowId: null });
+});
+
+ipcMain.on('tab:drag-move', (event, payload) => {
+  const sourceWindow = windowFor(event);
+  const state = tabDragStates.get(sourceWindow);
+  if (!sourceWindow || !state) return;
+  const point = { x: Number(payload?.screenX), y: Number(payload?.screenY) };
+  if (!Number.isFinite(point.x) || !Number.isFinite(point.y)) return;
+  const targetWindow = findWindowAtPoint(point, sourceWindow);
+  const sourceBounds = sourceWindow.getBounds();
+  const sourceTabsTop = Number(payload?.tabsTop);
+  const sourceTabsBottom = Number(payload?.tabsBottom);
+  const sourceTabsLeft = Number(payload?.tabsLeft);
+  const sourceTabsRight = Number(payload?.tabsRight);
+  let tabsTop = Number.isFinite(sourceTabsTop) ? sourceTabsTop : sourceBounds.y;
+  let tabsBottom = Number.isFinite(sourceTabsBottom) ? sourceTabsBottom : sourceBounds.y;
+  let tabsLeft = Number.isFinite(sourceTabsLeft) ? sourceTabsLeft : sourceBounds.x;
+  let tabsRight = Number.isFinite(sourceTabsRight) ? sourceTabsRight : sourceBounds.x + sourceBounds.width;
+  if (targetWindow && targetWindow.id !== sourceWindow.id) {
+    const targetBounds = targetWindow.getBounds();
+    const topOffset = Number.isFinite(sourceTabsTop) ? sourceTabsTop - sourceBounds.y : 0;
+    const bottomOffset = Number.isFinite(sourceTabsBottom) ? sourceTabsBottom - sourceBounds.y : 34;
+    tabsTop = targetBounds.y + topOffset;
+    tabsBottom = targetBounds.y + bottomOffset;
+  }
+  const insideTabsSection = point.x >= tabsLeft && point.x <= tabsRight && point.y >= tabsTop && point.y <= tabsBottom;
+  const verticalDetach = !insideTabsSection && (point.y < tabsTop || point.y > tabsBottom);
+  sendTabDragState(sourceWindow, {
+    active: true,
+    sourceWindowId: sourceWindow.id,
+    index: state.index,
+    x: point.x,
+    y: point.y,
+    targetWindowId: targetWindow?.id || null,
+    targetBounds: targetWindow ? targetWindow.getBounds() : null,
+    verticalDetach: verticalDetach && state.tabCount > 1,
+    canDetach: state.tabCount > 1
+  });
+});
+
+ipcMain.on('tab:drag-end', (event, payload) => {
+  const sourceWindow = windowFor(event);
+  const state = tabDragStates.get(sourceWindow);
+  tabDragStates.delete(sourceWindow);
+  if (!sourceWindow || !state) return;
+  const point = { x: Number(payload?.screenX), y: Number(payload?.screenY) };
+  const targetWindow = Number.isFinite(point.x) && Number.isFinite(point.y) ? findWindowAtPoint(point, sourceWindow) : null;
+  const sourceBounds = sourceWindow.getBounds();
+  const sourceTabsTop = Number(payload?.tabsTop);
+  const sourceTabsBottom = Number(payload?.tabsBottom);
+  const sourceTabsLeft = Number(payload?.tabsLeft);
+  const sourceTabsRight = Number(payload?.tabsRight);
+  let tabsTop = Number.isFinite(sourceTabsTop) ? sourceTabsTop : sourceBounds.y;
+  let tabsBottom = Number.isFinite(sourceTabsBottom) ? sourceTabsBottom : sourceBounds.y;
+  let tabsLeft = Number.isFinite(sourceTabsLeft) ? sourceTabsLeft : sourceBounds.x;
+  let tabsRight = Number.isFinite(sourceTabsRight) ? sourceTabsRight : sourceBounds.x + sourceBounds.width;
+  if (targetWindow && targetWindow.id !== sourceWindow.id) {
+    const targetBounds = targetWindow.getBounds();
+    const topOffset = Number.isFinite(sourceTabsTop) ? sourceTabsTop - sourceBounds.y : 0;
+    const bottomOffset = Number.isFinite(sourceTabsBottom) ? sourceTabsBottom - sourceBounds.y : 34;
+    tabsTop = targetBounds.y + topOffset;
+    tabsBottom = targetBounds.y + bottomOffset;
+  }
+  const insideTabsSection = Number.isFinite(point.x) && point.x >= tabsLeft && point.x <= tabsRight && Number.isFinite(point.y) && point.y >= tabsTop && point.y <= tabsBottom;
+  const verticalDetach = Number.isFinite(point.y) && !insideTabsSection && (point.y < tabsTop || point.y > tabsBottom);
+  if (verticalDetach && state.tabCount > 1 && (targetWindow === null || targetWindow.id === sourceWindow.id)) {
+    sourceWindow.webContents.send('tab:transfer-remove', { index: state.index, transfer: true });
+    const newWindow = createWindow(null, null, { tab: { ...state.tab, filePath: null, dirty: true }, sourceWindowId: sourceWindow.id, detached: true });
+    newWindow.once('ready-to-show', () => newWindow.focus());
+    sendTabDragState(sourceWindow, { active: false });
+    return;
+  }
+  if (!targetWindow) {
+    sendTabDragState(sourceWindow, { active: false });
+    return;
+  }
+  if (targetWindow.id === sourceWindow.id) {
+    sourceWindow.webContents.send('tab:drop-reorder', { index: state.index, targetIndex: Number(payload?.targetIndex) });
+  } else {
+    sourceWindow.webContents.send('tab:transfer-remove', { index: state.index, transfer: true });
+    targetWindow.webContents.send('tab:accept-transfer', { tab: state.tab, sourceWindowId: sourceWindow.id, screenX: point.x, transfer: true });
+    if (targetWindow.isMinimized()) targetWindow.restore();
+    targetWindow.focus();
+  }
+  sendTabDragState(sourceWindow, { active: false });
+});
+
 ipcMain.on('window:minimize', (event) => windowFor(event)?.minimize());
 ipcMain.on('window:toggle-maximize', (event) => {
   const win = windowFor(event);
@@ -422,9 +660,22 @@ ipcMain.on('window:toggle-maximize', (event) => {
   win.isMaximized() ? win.unmaximize() : win.maximize();
 });
 ipcMain.on('window:close', (event) => windowFor(event)?.close());
-ipcMain.on('window:close-response', (event, shouldClose) => {
+ipcMain.on('window:close-response', (event, shouldClose, keepDraft) => {
   const win = windowFor(event);
   if (!shouldClose || !win) return;
+  const id = sessionIdForWindow.get(win);
+  if (id && !keepDraft) deleteSessionFile(id);
   allowCloseFlags.set(win, true);
   win.close();
+});
+
+ipcMain.handle('session:save', (event, payload) => {
+  const win = windowFor(event);
+  if (!win) return;
+  writeSessionFile(sessionIdFor(win), { ...payload, dirty: true, savedAt: Date.now() });
+});
+ipcMain.on('session:clear', (event) => {
+  const win = windowFor(event);
+  const id = win && sessionIdForWindow.get(win);
+  if (id) deleteSessionFile(id);
 });

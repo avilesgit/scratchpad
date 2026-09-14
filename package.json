@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@mermaid-js/tiny": "12.0.0",
+    "katex": "^0.16.9",
     "scratchblocks": "3.7.1"
   },
   "build": {

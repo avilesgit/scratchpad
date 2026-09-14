@@ -26,8 +26,48 @@
 
   const ESCAPABLE = /\\([\\`*_{}[\]()#.!+\-~=])/g;
 
+  function mathTag(expr, displayMode) {
+    if (window.MathRenderer && window.MathRenderer.isAvailable()) {
+      const rendered = displayMode ? window.MathRenderer.renderBlock(expr) : window.MathRenderer.renderInline(expr);
+      if (rendered) return rendered;
+    }
+    return `<code>${expr}</code>`;
+  }
+
+  function unescapeHtml(text) {
+    return text.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+  }
+
+  function wrapAtomicMath(rawSource, innerHtml) {
+    const dataRaw = encodeURIComponent(rawSource);
+    return `<span class="md-math-inline" contenteditable="false" data-raw="${dataRaw}">${innerHtml}</span>`;
+  }
+
   function renderInline(raw, keepMarkers) {
     let text = escapeHtml(raw);
+
+    const mathSpans = [];
+    text = text.replace(/\$\$([^$]+)\$\$/g, (_m, expr) => {
+      if (keepMarkers) {
+        mathSpans.push(mark('$$') + `<code class="md-math-source" spellcheck="false">${expr}</code>` + mark('$$'));
+        return `\u0000MATH${mathSpans.length - 1}\u0000`;
+      }
+      const rendered = mathTag(expr, true);
+      const rawSource = `$$${unescapeHtml(expr)}$$`;
+      mathSpans.push(wrapAtomicMath(rawSource, rendered));
+      return `\u0000MATH${mathSpans.length - 1}\u0000`;
+    });
+    text = text.replace(/\$([^\s$][^$]*?)\$/g, (_m, expr) => {
+      if (keepMarkers) {
+        mathSpans.push(mark('$') + `<code class="md-math-source" spellcheck="false">${expr}</code>` + mark('$'));
+        return `\u0000MATH${mathSpans.length - 1}\u0000`;
+      }
+      const rendered = mathTag(expr, false);
+      const rawSource = `$${unescapeHtml(expr)}$`;
+      mathSpans.push(wrapAtomicMath(rawSource, rendered));
+      return `\u0000MATH${mathSpans.length - 1}\u0000`;
+    });
+
     const codeSpans = [];
     text = text.replace(/`([^`]+)`/g, (_m, code) => {
       codeSpans.push(code);
@@ -90,13 +130,16 @@
       return keepMarkers ? mark('\\') + ch : ch;
     });
 
+    text = text.replace(/\u0000MATH(\d+)\u0000/g, (_m, i) => mathSpans[Number(i)]);
+
     return text;
   }
 
   const FENCE_RE = /^\s*```/;
+  const MATH_FENCE_RE = /^\s*\$\$\$\s*$/;
 
   function isFenceLine(raw) {
-    return FENCE_RE.test(raw);
+    return FENCE_RE.test(raw) || MATH_FENCE_RE.test(raw);
   }
 
   function renderLine(raw, opts) {
