@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, dialog, Menu, session, screen } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, Menu, session, screen, shell } = require('electron');
 const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
@@ -14,16 +14,16 @@ const tabDragStates = new WeakMap();
 
 function sessionsDirectory() { return path.join(app.getPath('userData'), '.sessions'); }
 function ensureSessionsDirectory() {
-  try { fs.mkdirSync(sessionsDirectory(), { recursive: true }); } catch (_err) { /* already exists */ }
+  try { fs.mkdirSync(sessionsDirectory(), { recursive: true }); } catch (_err) {}
 }
 function sessionFilePath(id) { return path.join(sessionsDirectory(), `${id}.json`); }
 function createSessionId() { return `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`; }
 function writeSessionFile(id, data) {
   ensureSessionsDirectory();
-  try { fs.writeFileSync(sessionFilePath(id), JSON.stringify(data), 'utf8'); } catch (_err) { /* best effort */ }
+  try { fs.writeFileSync(sessionFilePath(id), JSON.stringify(data), 'utf8'); } catch (_err) {}
 }
 function deleteSessionFile(id) {
-  try { fs.unlinkSync(sessionFilePath(id)); } catch (_err) { /* nothing to remove */ }
+  try { fs.unlinkSync(sessionFilePath(id)); } catch (_err) {}
 }
 function readSessionFiles() {
   ensureSessionsDirectory();
@@ -119,7 +119,10 @@ function bootPreferences() {
     fontSizeHeading: sanitizedFontSize(preferences.fontSizeHeading, DEFAULT_FONT_SIZES.fontSizeHeading),
     fontSizeCode: sanitizedFontSize(preferences.fontSizeCode, DEFAULT_FONT_SIZES.fontSizeCode),
     defaultView: ['edit', 'live', 'preview'].includes(preferences.defaultView) ? preferences.defaultView : 'edit',
-    tabsEnabled: preferences.tabsEnabled === true
+    tabsEnabled: preferences.tabsEnabled === true,
+    statusBar: preferences.statusBar !== false,
+    wordWrap: preferences.wordWrap !== false,
+    textWidth: preferences.textWidth === 'wide' ? 'wide' : 'standard'
   };
 }
 
@@ -130,7 +133,7 @@ function readCustomDictionary() {
 
 function applyCustomDictionary(ses) {
   readCustomDictionary().forEach((word) => {
-    try { ses.addWordToSpellCheckerDictionary(word); } catch (_err) { /* unavailable on this platform */ }
+    try { ses.addWordToSpellCheckerDictionary(word); } catch (_err) {}
   });
 }
 
@@ -181,6 +184,14 @@ function sendFileToRenderer(win, filePath) {
   win.webContents.send('file:open-path', { filePath, content, fileName: path.basename(filePath) });
 }
 
+function openExternalUrl(rawUrl) {
+  let parsed;
+  try { parsed = new URL(String(rawUrl)); } catch (_err) { return false; }
+  if (!['http:', 'https:', 'mailto:'].includes(parsed.protocol)) return false;
+  shell.openExternal(parsed.href).catch(() => {});
+  return true;
+}
+
 function broadcast(channel, payload) {
   windows.forEach((win) => { if (!win.isDestroyed()) win.webContents.send(channel, payload); });
 }
@@ -192,9 +203,7 @@ function wireSharedSpellcheckSession() {
     const savedLangs = readPreferences().spellcheckLanguages;
     const initialLangs = Array.isArray(savedLangs) && savedLangs.length ? savedLangs : ['en-US'];
     ses.setSpellCheckerLanguages(initialLangs);
-  } catch (err) {
-    // Spellchecker may be unavailable on some platforms/builds.
-  }
+  } catch (err) {}
 
   ses.on('spellcheck-dictionary-download-success', (_event, lang) => broadcast('spellcheck:download-status', { lang, status: 'success' }));
   ses.on('spellcheck-dictionary-download-begin', (_event, lang) => broadcast('spellcheck:download-status', { lang, status: 'begin' }));
@@ -246,10 +255,25 @@ function createWindow(filePath, restoredSession, initialTab) {
     if (filePath) sendFileToRenderer(win, filePath);
   });
 
+  win.webContents.setWindowOpenHandler(({ url }) => {
+    openExternalUrl(url);
+    return { action: 'deny' };
+  });
+  win.webContents.on('will-navigate', (event, url) => {
+    if (url === win.webContents.getURL()) return;
+    event.preventDefault();
+    openExternalUrl(url);
+  });
+
   win.webContents.on('before-input-event', (event, input) => {
     const key = input.key.toLowerCase();
     const isMod = input.control || input.meta;
     const isDevToolsShortcut = isMod && input.shift && ['i', 'j', 'c'].includes(key);
+    if (input.type === 'keyDown' && input.control && !input.alt && !input.meta && key === 'tab' && readPreferences().tabsEnabled === true) {
+      event.preventDefault();
+      win.webContents.send('tab:shortcut', input.shift ? 'prev' : 'next');
+      return;
+    }
     if (isMod && ['t', 'w'].includes(key) && readPreferences().tabsEnabled === true) {
       event.preventDefault();
       win.webContents.send('tab:shortcut', input.shift && key === 't' ? 'reopen' : key === 't' ? 'new' : 'close');
@@ -415,6 +439,26 @@ ipcMain.handle('file:save', async (event, { filePath, fileName, content }) => {
   return { filePath: target, fileName: path.basename(target) };
 });
 
+ipcMain.handle('file:autosave', (_event, { filePath, content } = {}) => {
+  if (typeof filePath !== 'string' || typeof content !== 'string' || !path.isAbsolute(filePath)) return null;
+  try {
+    if (!fs.statSync(filePath).isFile()) return null;
+    fs.writeFileSync(filePath, content, 'utf-8');
+    return { filePath, fileName: path.basename(filePath) };
+  } catch (_err) {
+    return null;
+  }
+});
+
+ipcMain.on('link:open', (_event, url) => { openExternalUrl(url); });
+
+ipcMain.on('edit:command', (event, command) => {
+  const contents = event.sender;
+  if (command === 'cut') contents.cut();
+  else if (command === 'copy') contents.copy();
+  else if (command === 'paste') contents.paste();
+});
+
 ipcMain.handle('dialog:saveAs', async (event, { fileName, content }) => {
   const result = await dialog.showSaveDialog(windowFor(event), { defaultPath: path.basename(fileName || 'Untitled'), filters: FILE_FILTERS });
   if (result.canceled || !result.filePath) return null;
@@ -524,6 +568,9 @@ ipcMain.handle('preferences:reset', () => {
     fontSizeCode: DEFAULT_FONT_SIZES.fontSizeCode,
     defaultView: 'edit',
     tabsEnabled: false,
+    statusBar: true,
+    wordWrap: true,
+    textWidth: 'standard',
   };
   writePreferences(preferences);
   return preferences;
@@ -531,6 +578,27 @@ ipcMain.handle('preferences:reset', () => {
 ipcMain.handle('preferences:set-tabs-enabled', (_event, enabled) => {
   const preferences = { ...readPreferences(), tabsEnabled: enabled === true };
   writePreferences(preferences);
+  return preferences;
+});
+ipcMain.handle('preferences:set-status-bar', (_event, visible) => {
+  const preferences = { ...readPreferences(), statusBar: visible !== false };
+  writePreferences(preferences);
+  return preferences;
+});
+ipcMain.handle('preferences:set-word-wrap', (_event, enabled) => {
+  const preferences = { ...readPreferences(), wordWrap: enabled !== false };
+  writePreferences(preferences);
+  return preferences;
+});
+ipcMain.handle('preferences:set-text-width', (_event, width) => {
+  const preferences = { ...readPreferences(), textWidth: width === 'wide' ? 'wide' : 'standard' };
+  writePreferences(preferences);
+  return preferences;
+});
+ipcMain.handle('preferences:set-autosave', (_event, enabled) => {
+  const preferences = { ...readPreferences(), autosave: enabled === true };
+  writePreferences(preferences);
+  broadcast('autosave:changed', preferences.autosave);
   return preferences;
 });
 ipcMain.handle('preferences:set-default-view', (_event, view) => {

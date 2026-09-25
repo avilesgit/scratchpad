@@ -61,7 +61,11 @@
     const selection = window.getSelection();
     selection.removeAllRanges();
     selection.addRange(savedRange);
-    document.execCommand('insertText', false, matchCapitalization(savedRange.toString(), synonym));
+    const selected = savedRange.toString();
+    const leading = (selected.match(/^\s+/) || [''])[0];
+    const trailing = selected.length > leading.length ? (selected.match(/\s+$/) || [''])[0] : '';
+    const core = selected.slice(leading.length, selected.length - trailing.length);
+    document.execCommand('insertText', false, leading + matchCapitalization(core, synonym) + trailing);
   }
 
   function matchCapitalization(original, replacement) {

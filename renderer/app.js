@@ -6,6 +6,16 @@
   const openBtn = document.getElementById('openBtn');
   const saveBtn = document.getElementById('saveBtn');
   const saveAsBtn = document.getElementById('saveAsBtn');
+  const saveAllBtn = document.getElementById('saveAllBtn');
+  const autosaveBtn = document.getElementById('autosaveBtn');
+  const fileMenuBtn = document.getElementById('fileMenuBtn');
+  const fileMenu = document.getElementById('fileMenu');
+  const editMenuBtn = document.getElementById('editMenuBtn');
+  const editMenu = document.getElementById('editMenu');
+  const editorEl = document.getElementById('editor');
+  const linkTooltip = document.getElementById('linkTooltip');
+  const linkTooltipSite = document.getElementById('linkTooltipSite');
+  const linkTooltipUrl = document.getElementById('linkTooltipUrl');
   const settingsBtn = document.getElementById('settingsBtn');
   const settingsPanel = document.getElementById('settingsPanel');
   const themeLightBtn = document.getElementById('themeLightBtn');
@@ -24,6 +34,10 @@
   const tabsList = document.getElementById('tabsList');
   const newTabBtn = document.getElementById('newTabBtn');
   const tabsEnabledInput = document.getElementById('tabsEnabledInput');
+  const statusBarInput = document.getElementById('statusBarInput');
+  const wordWrapInput = document.getElementById('wordWrapInput');
+  const textWidthStandardBtn = document.getElementById('textWidthStandardBtn');
+  const textWidthWideBtn = document.getElementById('textWidthWideBtn');
   const minimizeBtn = document.getElementById('minimizeBtn');
   const maximizeBtn = document.getElementById('maximizeBtn');
   const closeBtn = document.getElementById('closeBtn');
@@ -120,6 +134,10 @@
   let suppressNextTabClick = false;
   let detachPreview = null;
   let defaultViewPreference = 'edit';
+  let autosaveEnabled = false;
+  let autosaveTimer = null;
+  let autosavePromise = null;
+  const AUTOSAVE_DELAY_MS = 1500;
 
   function makeTab(data = {}) {
     return {
@@ -422,6 +440,12 @@
     }
   }
 
+  function cycleTab(delta) {
+    if (!tabsEnabled || tabs.length < 2) return;
+    switchTab((activeTabIndex + delta + tabs.length) % tabs.length);
+    tabsList?.querySelector('.tab.active')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
   function reopenClosedTab() {
     if (!tabsEnabled || !closedTabs.length) return;
     captureActiveTab();
@@ -548,6 +572,8 @@
     if (shortcut === 'new') createNewTab();
     else if (shortcut === 'reopen') reopenClosedTab();
     else if (shortcut === 'close') closeTab(activeTabIndex);
+    else if (shortcut === 'next') cycleTab(1);
+    else if (shortcut === 'prev') cycleTab(-1);
   });
 
   window.api?.onTabDragState?.((state) => {
@@ -663,6 +689,23 @@
     input.value = Number.isFinite(num) && num > 0 ? num : fallback;
   }
 
+  function applyStatusBar(visible) {
+    document.documentElement.dataset.statusbar = visible ? 'shown' : 'hidden';
+    if (statusBarInput) statusBarInput.checked = visible;
+  }
+
+  function applyWordWrap(enabled) {
+    document.documentElement.dataset.wrap = enabled ? 'on' : 'off';
+    if (wordWrapInput) wordWrapInput.checked = enabled;
+  }
+
+  function applyTextWidth(width) {
+    const wide = width === 'wide';
+    document.documentElement.dataset.width = wide ? 'wide' : 'standard';
+    textWidthStandardBtn?.classList.toggle('active', !wide);
+    textWidthWideBtn?.classList.toggle('active', wide);
+  }
+
   async function initUI() {
     const preferences = await window.api?.getPreferences?.();
     if (preferences?.theme === 'dark' || preferences?.theme === 'light') {
@@ -679,6 +722,11 @@
     defaultViewPreference = ['edit', 'live', 'preview'].includes(preferences?.defaultView) ? preferences.defaultView : 'edit';
     tabsEnabled = preferences?.tabsEnabled === true;
     if (tabsEnabledInput) tabsEnabledInput.checked = tabsEnabled;
+    applyStatusBar(preferences?.statusBar !== false);
+    applyWordWrap(preferences?.wordWrap !== false);
+    applyTextWidth(preferences?.textWidth === 'wide' ? 'wide' : 'standard');
+    autosaveEnabled = preferences?.autosave === true;
+    updateAutosaveToggle();
     updateThemeButtons();
     iconUrls = await window.api?.getIcons?.() || {};
     updateDocumentIcon();
@@ -816,6 +864,22 @@
     await window.api?.setTabsEnabledPreference?.(enabled);
   });
   newTabBtn?.addEventListener('click', () => createNewTab());
+  statusBarInput?.addEventListener('change', () => {
+    applyStatusBar(statusBarInput.checked);
+    window.api?.setStatusBarPreference?.(statusBarInput.checked);
+  });
+  wordWrapInput?.addEventListener('change', () => {
+    applyWordWrap(wordWrapInput.checked);
+    window.api?.setWordWrapPreference?.(wordWrapInput.checked);
+  });
+  textWidthStandardBtn?.addEventListener('click', () => {
+    applyTextWidth('standard');
+    window.api?.setTextWidthPreference?.('standard');
+  });
+  textWidthWideBtn?.addEventListener('click', () => {
+    applyTextWidth('wide');
+    window.api?.setTextWidthPreference?.('wide');
+  });
 
 
   restoreDefaultsBtn?.addEventListener('click', async () => {
@@ -842,6 +906,9 @@
     if (defaultViewSelect) defaultViewSelect.value = preferences.defaultView;
     tabsEnabled = preferences.tabsEnabled === true;
     if (tabsEnabledInput) tabsEnabledInput.checked = tabsEnabled;
+    applyStatusBar(preferences.statusBar !== false);
+    applyWordWrap(preferences.wordWrap !== false);
+    applyTextWidth(preferences.textWidth === 'wide' ? 'wide' : 'standard');
     if (tabsEnabled && !tabs.length) tabs.push(makeTab());
     renderTabs();
     window.Editor?.setView?.(preferences.defaultView);
@@ -938,8 +1005,265 @@
     }
   }
 
+  async function doSaveAll() {
+    if (!window.api || !window.Editor) return;
+    if (!tabsEnabled) {
+      await doSave();
+      return;
+    }
+    captureActiveTab();
+    const originalTab = tabs[activeTabIndex];
+    for (const tab of tabs.slice()) {
+      if (!tab.dirty || !tabs.includes(tab)) continue;
+      if (tab === tabs[activeTabIndex]) {
+        await doSave();
+      } else if (tab.filePath) {
+        const result = await window.api.saveFile({ filePath: tab.filePath, fileName: tab.fileName, content: tab.content });
+        if (result) {
+          tab.filePath = result.filePath;
+          tab.fileName = result.fileName || tab.fileName;
+          tab.dirty = false;
+        }
+      } else {
+        switchTab(tabs.indexOf(tab));
+        await doSave();
+      }
+    }
+    const originalIndex = tabs.indexOf(originalTab);
+    if (originalIndex !== -1 && originalIndex !== activeTabIndex) switchTab(originalIndex);
+    renderTabs();
+    persistTabs();
+  }
+
   saveBtn?.addEventListener('click', doSave);
   saveAsBtn?.addEventListener('click', doSaveAs);
+  saveAllBtn?.addEventListener('click', doSaveAll);
+
+  function updateAutosaveToggle() {
+    autosaveBtn?.setAttribute('aria-checked', autosaveEnabled ? 'true' : 'false');
+  }
+
+  function scheduleAutosave(delay = AUTOSAVE_DELAY_MS) {
+    clearTimeout(autosaveTimer);
+    autosaveTimer = null;
+    if (autosaveEnabled) autosaveTimer = setTimeout(runAutosave, delay);
+  }
+
+  async function performAutosave() {
+    if (!autosaveEnabled || !window.api?.autosaveFile || !window.Editor) return;
+    const targets = [];
+    if (tabsEnabled) {
+      captureActiveTab();
+      tabs.forEach((tab) => targets.push({ tab, filePath: tab.filePath, dirty: tab.dirty, content: tab.content }));
+    } else {
+      targets.push({
+        tab: null,
+        filePath: currentFilePath,
+        dirty: window.Editor.isDirty(),
+        content: window.Editor.getContent()
+      });
+    }
+    for (const target of targets) {
+      if (!target.dirty || !target.filePath) continue;
+      const saved = await window.api.autosaveFile({ filePath: target.filePath, content: target.content });
+      if (!saved) continue;
+      const isActive = !target.tab || target.tab === tabs[activeTabIndex];
+      if (isActive) {
+        if (window.Editor.getContent() !== target.content) continue;
+        window.Editor.markSaved();
+      } else if (target.tab.content !== target.content) {
+        continue;
+      }
+      if (target.tab) {
+        target.tab.dirty = false;
+        renderTabs();
+        persistTabs();
+      }
+      updateFilenameDisplay(false);
+    }
+  }
+
+  function runAutosave() {
+    autosaveTimer = null;
+    if (!autosavePromise) {
+      autosavePromise = performAutosave().catch(() => {}).finally(() => { autosavePromise = null; });
+    }
+    return autosavePromise;
+  }
+
+  window.addEventListener('editor:edited', () => scheduleAutosave());
+
+  window.api?.onAutosaveChanged?.((enabled) => {
+    autosaveEnabled = enabled === true;
+    updateAutosaveToggle();
+    if (autosaveEnabled) scheduleAutosave(0);
+  });
+
+  autosaveBtn?.addEventListener('click', async () => {
+    autosaveEnabled = !autosaveEnabled;
+    updateAutosaveToggle();
+    await window.api?.setAutosavePreference?.(autosaveEnabled);
+    if (autosaveEnabled) scheduleAutosave(0);
+  });
+
+  const menus = [
+    { button: fileMenuBtn, panel: fileMenu },
+    { button: editMenuBtn, panel: editMenu }
+  ].filter((menu) => menu.button && menu.panel);
+
+  function closeMenus() {
+    menus.forEach(({ button, panel }) => {
+      panel.classList.add('hidden');
+      panel.style.left = '';
+      button.setAttribute('aria-expanded', 'false');
+    });
+  }
+
+  function refreshEditMenuState() {
+    const state = window.Editor?.getState?.();
+    const readOnly = !state || state.view === 'preview';
+    editMenu.querySelectorAll('[data-edit]').forEach((item) => {
+      const action = item.dataset.edit;
+      if (['undo', 'redo', 'cut', 'paste'].includes(action)) item.disabled = readOnly;
+      else if (action === 'clear') item.disabled = readOnly || state.mode === 'text';
+    });
+  }
+
+  function toggleMenu(menu) {
+    const wasHidden = menu.panel.classList.contains('hidden');
+    closeMenus();
+    if (!wasHidden) return;
+    settingsPanel?.classList.add('hidden');
+    if (menu.panel === editMenu) refreshEditMenuState();
+    menu.panel.classList.remove('hidden');
+    menu.button.setAttribute('aria-expanded', 'true');
+    const overflow = menu.panel.getBoundingClientRect().right - (window.innerWidth - 8);
+    if (overflow > 0) menu.panel.style.left = `${-overflow}px`;
+  }
+
+  menus.forEach((menu) => {
+    menu.button.addEventListener('mousedown', (event) => event.preventDefault());
+    menu.button.addEventListener('click', () => toggleMenu(menu));
+    menu.panel.addEventListener('mousedown', (event) => {
+      if (event.target.closest('.menu-item')) event.preventDefault();
+    });
+    menu.panel.addEventListener('click', (event) => {
+      const item = event.target.closest('.menu-item');
+      if (!item || item.disabled || item.dataset.keepOpen === 'true') return;
+      closeMenus();
+    });
+  });
+
+  document.addEventListener('click', (event) => {
+    const path = event.composedPath();
+    if (!menus.some(({ button, panel }) => path.includes(button) || path.includes(panel))) closeMenus();
+  });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && menus.some(({ panel }) => !panel.classList.contains('hidden'))) closeMenus();
+  });
+  settingsBtn?.addEventListener('click', closeMenus);
+
+  const editActions = {
+    undo: () => window.Editor?.undo?.(),
+    redo: () => window.Editor?.redo?.(),
+    clear: () => window.Editor?.clearFormatting?.(),
+    cut: () => window.api?.editCommand?.('cut'),
+    copy: () => window.api?.editCommand?.('copy'),
+    paste: () => window.api?.editCommand?.('paste'),
+    find: () => window.Find?.open(false),
+    replace: () => window.Find?.open(true)
+  };
+
+  editMenu?.addEventListener('click', (event) => {
+    const item = event.target.closest('[data-edit]');
+    if (!item || item.disabled) return;
+    editActions[item.dataset.edit]?.();
+  });
+
+  function normalizeLinkUrl(rawHref) {
+    const href = String(rawHref || '').trim();
+    if (!href) return null;
+    const candidate = /^[a-z][a-z0-9+.-]*:/i.test(href) ? href : (/^www\.\S+$/i.test(href) ? `https://${href}` : null);
+    if (!candidate) return null;
+    try {
+      const parsed = new URL(candidate);
+      if (!['http:', 'https:', 'mailto:'].includes(parsed.protocol)) return null;
+      return parsed;
+    } catch (_err) {
+      return null;
+    }
+  }
+
+  let hoveredLink = null;
+
+  function hideLinkTooltip() {
+    hoveredLink = null;
+    linkTooltip?.classList.add('hidden');
+  }
+
+  function positionLinkTooltip(event) {
+    if (!linkTooltip) return;
+    const gap = 16;
+    const width = linkTooltip.offsetWidth;
+    const height = linkTooltip.offsetHeight;
+    let left = event.clientX + gap;
+    let top = event.clientY + gap + 4;
+    if (left + width > window.innerWidth - 6) left = Math.max(6, event.clientX - width - gap);
+    if (top + height > window.innerHeight - 6) top = Math.max(6, event.clientY - height - gap);
+    linkTooltip.style.left = `${left}px`;
+    linkTooltip.style.top = `${top}px`;
+  }
+
+  editorEl?.addEventListener('mouseover', (event) => {
+    const anchor = event.target.closest?.('a[href]');
+    if (!anchor) {
+      if (hoveredLink) hideLinkTooltip();
+      return;
+    }
+    if (anchor === hoveredLink) return;
+    const parsed = normalizeLinkUrl(anchor.getAttribute('href'));
+    if (!parsed) {
+      hideLinkTooltip();
+      return;
+    }
+    hoveredLink = anchor;
+    if (parsed.protocol === 'mailto:') {
+      linkTooltipSite.textContent = 'Email';
+      linkTooltipUrl.textContent = parsed.href;
+    } else {
+      linkTooltipSite.textContent = parsed.hostname.replace(/^www\./i, '');
+      linkTooltipUrl.textContent = parsed.href;
+    }
+    linkTooltip.classList.remove('hidden');
+    positionLinkTooltip(event);
+  });
+  editorEl?.addEventListener('mousemove', (event) => {
+    if (hoveredLink) positionLinkTooltip(event);
+  });
+  editorEl?.addEventListener('mouseout', (event) => {
+    if (!hoveredLink) return;
+    const next = event.relatedTarget;
+    if (next && hoveredLink.contains(next)) return;
+    hideLinkTooltip();
+  });
+  window.addEventListener('blur', hideLinkTooltip);
+  document.addEventListener('keydown', (event) => {
+    if (!['Control', 'Meta', 'Shift', 'Alt'].includes(event.key)) hideLinkTooltip();
+  }, true);
+  document.getElementById('editorWrap')?.addEventListener('scroll', hideLinkTooltip);
+
+  function openLinkExternally(event) {
+    const anchor = event.target.closest?.('a[href]');
+    if (!anchor) return;
+    event.preventDefault();
+    if (event.type === 'auxclick' && event.button !== 1) return;
+    const inPreview = window.Editor?.getState?.().view === 'preview';
+    if (event.type === 'click' && !inPreview && !(event.ctrlKey || event.metaKey)) return;
+    const parsed = normalizeLinkUrl(anchor.getAttribute('href'));
+    if (parsed) window.api?.openExternal?.(parsed.href);
+  }
+  editorEl?.addEventListener('click', openLinkExternally);
+  editorEl?.addEventListener('auxclick', openLinkExternally);
 
   window.addEventListener('keydown', (event) => {
     const isMod = event.metaKey || event.ctrlKey;
@@ -974,6 +1298,10 @@
 
   window.api?.onWindowCloseRequest?.(async () => {
     const caret = window.Editor?.getCaret?.();
+    if (autosaveEnabled) {
+      clearTimeout(autosaveTimer);
+      await runAutosave();
+    }
     if (tabsEnabled) {
       captureActiveTab();
       const dirty = tabs.some((tab) => tab.dirty);

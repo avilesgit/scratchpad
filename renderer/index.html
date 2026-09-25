@@ -16,6 +16,9 @@
     if (prefs.fontSizeText) root.style.setProperty('--font-size-text', prefs.fontSizeText + 'px');
     if (prefs.fontSizeHeading) root.style.setProperty('--font-size-heading', prefs.fontSizeHeading + 'px');
     if (prefs.fontSizeCode) root.style.setProperty('--font-size-code', prefs.fontSizeCode + 'px');
+    root.dataset.statusbar = prefs.statusBar === false ? 'hidden' : 'shown';
+    root.dataset.wrap = prefs.wordWrap === false ? 'off' : 'on';
+    root.dataset.width = prefs.textWidth === 'wide' ? 'wide' : 'standard';
   })();
 </script>
 <link rel="stylesheet" href="styles.css">
@@ -40,9 +43,33 @@
           <option value="preview">Preview</option>
         </select>
         <span class="divider"></span>
-        <button id="openBtn">Open</button>
-        <button id="saveBtn">Save</button>
-        <button id="saveAsBtn">Save As</button>
+        <div id="fileMenuGroup" class="control-group">
+          <button id="fileMenuBtn" type="button" aria-haspopup="true" aria-expanded="false">File</button>
+          <div id="fileMenu" class="menu-panel hidden" role="menu">
+            <button type="button" id="openBtn" class="menu-item" role="menuitem"><span>Open</span></button>
+            <button type="button" id="saveBtn" class="menu-item" role="menuitem"><span>Save</span><span class="menu-shortcut">Ctrl+S</span></button>
+            <button type="button" id="saveAsBtn" class="menu-item" role="menuitem"><span>Save As</span><span class="menu-shortcut">Ctrl+Shift+S</span></button>
+            <button type="button" id="saveAllBtn" class="menu-item" role="menuitem"><span>Save All</span></button>
+            <div class="menu-separator"></div>
+            <button type="button" id="autosaveBtn" class="menu-item" role="menuitemcheckbox" aria-checked="false" data-keep-open="true"><span>Auto Save</span><span class="menu-switch"></span></button>
+          </div>
+        </div>
+        <div id="editMenuGroup" class="control-group">
+          <button id="editMenuBtn" type="button" aria-haspopup="true" aria-expanded="false">Edit</button>
+          <div id="editMenu" class="menu-panel hidden" role="menu">
+            <button type="button" class="menu-item" role="menuitem" data-edit="undo"><span>Undo</span><span class="menu-shortcut">Ctrl+Z</span></button>
+            <button type="button" class="menu-item" role="menuitem" data-edit="redo"><span>Redo</span><span class="menu-shortcut">Ctrl+Y</span></button>
+            <div class="menu-separator"></div>
+            <button type="button" class="menu-item" role="menuitem" data-edit="clear"><span>Clear Formatting</span></button>
+            <div class="menu-separator"></div>
+            <button type="button" class="menu-item" role="menuitem" data-edit="cut"><span>Cut</span><span class="menu-shortcut">Ctrl+X</span></button>
+            <button type="button" class="menu-item" role="menuitem" data-edit="copy"><span>Copy</span><span class="menu-shortcut">Ctrl+C</span></button>
+            <button type="button" class="menu-item" role="menuitem" data-edit="paste"><span>Paste</span><span class="menu-shortcut">Ctrl+V</span></button>
+            <div class="menu-separator"></div>
+            <button type="button" class="menu-item" role="menuitem" data-edit="find"><span>Find</span><span class="menu-shortcut">Ctrl+F</span></button>
+            <button type="button" class="menu-item" role="menuitem" data-edit="replace"><span>Find and Replace</span><span class="menu-shortcut">Ctrl+H</span></button>
+          </div>
+        </div>
         <div id="settingsGroup" class="control-group">
           <button id="settingsBtn" title="Settings" aria-label="Settings">&#9881;</button>
           <div id="settingsPanel" class="hidden">
@@ -115,7 +142,22 @@
             </label>
             <label class="settings-row">
               <span class="settings-label">Tabs</span>
-              <label class="settings-check"><input type="checkbox" id="tabsEnabledInput"> Enable tabs</label>
+              <input type="checkbox" id="tabsEnabledInput">
+            </label>
+            <label class="settings-row">
+              <span class="settings-label">Status bar</span>
+              <input type="checkbox" id="statusBarInput">
+            </label>
+            <label class="settings-row">
+              <span class="settings-label">Word wrap</span>
+              <input type="checkbox" id="wordWrapInput">
+            </label>
+            <label class="settings-row">
+              <span class="settings-label">Text width</span>
+              <div class="settings-theme-toggle" role="group" aria-label="Text width">
+                <button type="button" id="textWidthStandardBtn" class="pill">Standard</button>
+                <button type="button" id="textWidthWideBtn" class="pill">Wide</button>
+              </div>
             </label>
             <label class="settings-row">
               <span class="settings-label">Default view</span>
@@ -141,6 +183,23 @@
     <div id="tabsBar" class="hidden" aria-label="Document tabs">
       <div id="tabsList"></div>
       <button id="newTabBtn" class="tab-new" type="button" title="New tab" aria-label="New tab">+</button>
+    </div>
+
+    <div id="findBar" class="hidden" role="search" aria-label="Find and replace">
+      <div class="find-row">
+        <input id="findInput" type="text" placeholder="Find" autocomplete="off" spellcheck="false" aria-label="Find">
+        <span id="findCount" class="find-count" aria-live="polite"></span>
+        <button id="findPrevBtn" type="button" title="Previous match (Shift+Enter)" aria-label="Previous match">&#8593;</button>
+        <button id="findNextBtn" type="button" title="Next match (Enter)" aria-label="Next match">&#8595;</button>
+        <button id="findCaseBtn" type="button" class="find-toggle" aria-pressed="false">Match case</button>
+        <button id="findWrapBtn" type="button" class="find-toggle" aria-pressed="true">Wrap around</button>
+        <button id="findCloseBtn" type="button" title="Close (Esc)" aria-label="Close find">&#10005;</button>
+      </div>
+      <div id="replaceRow" class="find-row hidden">
+        <input id="replaceInput" type="text" placeholder="Replace with" autocomplete="off" spellcheck="false" aria-label="Replace with">
+        <button id="replaceBtn" type="button">Replace</button>
+        <button id="replaceAllBtn" type="button">Replace All</button>
+      </div>
     </div>
 
     <main id="editorWrap">
@@ -174,10 +233,16 @@
           <input id="langSearch" class="lang-search" type="text" placeholder="Search dictionaries…" autocomplete="off" spellcheck="false">
           <div id="langList"></div>
         </div>
-        <div id="spellContextMenu" class="spell-context-menu hidden" role="menu"></div>
-        <div id="synonymsContextMenu" class="spell-context-menu hidden" role="menu"></div>
       </div>
     </footer>
+  </div>
+
+  <div id="spellContextMenu" class="spell-context-menu hidden" role="menu"></div>
+  <div id="synonymsContextMenu" class="spell-context-menu hidden" role="menu"></div>
+
+  <div id="linkTooltip" class="link-tooltip hidden" role="tooltip">
+    <div id="linkTooltipSite" class="link-tooltip-site"></div>
+    <div id="linkTooltipUrl" class="link-tooltip-url"></div>
   </div>
 
   <div id="confirmOverlay" class="modal-overlay hidden">
@@ -201,6 +266,7 @@
   <script src="bbcode.js"></script>
   <script src="pasteconvert.js"></script>
   <script src="editor.js"></script>
+  <script src="find.js"></script>
   <script src="spellcheck.js"></script>
   <script src="shortcodes.js"></script>
   <script src="synonyms.js"></script>

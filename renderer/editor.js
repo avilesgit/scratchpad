@@ -16,6 +16,7 @@
 
   let editorEl = null;
   let isComposing = false;
+  let dragSource = null;
   let forcePlainPaste = false;
 
   let undoStack = [];
@@ -808,6 +809,7 @@
   function pushUndoSnapshot(forceNewGroup) {
     syncActiveLineFromDOM();
     setDirty(true);
+    window.dispatchEvent(new Event('editor:edited'));
     const now = Date.now();
     if (!forceNewGroup && undoStack.length && now - lastGroupTime < UNDO_GROUP_MS) {
       lastGroupTime = now;
@@ -833,6 +835,7 @@
     redoStack.push({ lines: state.lines.slice(), line: caret.line, offset: caret.offset });
     lastGroupTime = 0;
     setDirty(true);
+    window.dispatchEvent(new Event('editor:edited'));
     restoreSnapshot(snapshot);
   }
 
@@ -843,7 +846,245 @@
     undoStack.push({ lines: state.lines.slice(), line: caret.line, offset: caret.offset });
     lastGroupTime = 0;
     setDirty(true);
+    window.dispatchEvent(new Event('editor:edited'));
     restoreSnapshot(snapshot);
+  }
+
+  function stripMarkdownInline(text) {
+    const saved = [];
+    const keep = (value) => {
+      saved.push(value);
+      return `\u0000K${saved.length - 1}\u0000`;
+    };
+    let out = text;
+    out = out.replace(/\$\$([^$]+)\$\$/g, keep);
+    out = out.replace(/\$([^\s$][^$]*?)\$/g, keep);
+    out = out.replace(/`([^`]+)`/g, (_m, code) => keep(code));
+    out = out.replace(/\\([\\`*_{}[\]()#.!+\-~=])/g, keep);
+    out = out.replace(/(!?\[[^\]]*\]\()([^)\s]+(?:\s+["'][^"']*["'])?\))/g, (_m, head, tail) => head + keep(tail));
+    out = out.replace(/\*\*([^*]+)\*\*/g, '$1');
+    out = out.replace(/__([^_]+)__/g, '$1');
+    out = out.replace(/==([^=]+)==/g, '$1');
+    out = out.replace(/\*([^*]+)\*/g, '$1');
+    out = out.replace(/_([^_]+)_/g, '$1');
+    for (let pass = 0; pass < 4 && out.includes('\u0000K'); pass += 1) {
+      out = out.replace(/\u0000K(\d+)\u0000/g, (_m, i) => saved[Number(i)]);
+    }
+    return out;
+  }
+
+  function formattingClearedLine(index) {
+    const raw = state.lines[index];
+    if (state.mode === 'markdown') {
+      if (window.MarkdownRenderer && window.MarkdownRenderer.isFenceLine(raw)) return raw;
+      if (markdownFenceStateBefore(index).inFence || findMarkdownMathFenceContaining(index)) return raw;
+      let text = raw;
+      let prefixed = false;
+      let match = null;
+      while ((match = text.match(/^>\s?(.*)$/))) {
+        text = match[1];
+        prefixed = true;
+      }
+      match = text.match(/^#{1,6}\s+(.*)$/);
+      if (match) {
+        text = match[1];
+        prefixed = true;
+      }
+      if (prefixed) return stripMarkdownInline(text);
+      match = text.match(/^(\s*)([-*+])(\s+)(.*)$/) || text.match(/^(\s*)(\d+(?:\.\d+)*\.)(\s+)(.*)$/);
+      if (match) return match[1] + match[2] + match[3] + stripMarkdownInline(match[4]);
+      return stripMarkdownInline(text);
+    }
+    if (state.mode === 'bbcode') {
+      if (/\[\/?scratchblocks/i.test(raw) || findScratchblocksSpanContaining(index)) return raw;
+      return raw.replace(/\[\/?(?:b|i|u|s|strike|code|color|size|quote|center)(?:=[^\]]*)?\]/gi, '');
+    }
+    return raw;
+  }
+
+  function clearFormatting() {
+    if (!editorEl || state.view === 'preview' || state.mode === 'text') return false;
+    const sel = window.getSelection();
+    if (!sel || !sel.rangeCount || !editorEl.contains(sel.anchorNode)) return false;
+    syncActiveLineFromDOM();
+    const range = sel.getRangeAt(0);
+    const boundaryLine = (container, offset, isEnd) => {
+      if (container === editorEl) {
+        const index = isEnd ? offset - 1 : offset;
+        return Math.min(Math.max(index, 0), state.lines.length - 1);
+      }
+      const lineEl = getClosestLine(container);
+      return lineEl ? Number(lineEl.dataset.index) : null;
+    };
+    const first = boundaryLine(range.startContainer, range.startOffset, false);
+    let last = boundaryLine(range.endContainer, range.endOffset, true);
+    if (first === null || last === null) return false;
+    const endLineEl = getClosestLine(range.endContainer);
+    if (endLineEl && last > first && getOffsetAtBoundary(endLineEl, range.endContainer, range.endOffset) === 0) last -= 1;
+    const changes = [];
+    for (let i = first; i <= last; i += 1) {
+      const next = formattingClearedLine(i);
+      if (next !== state.lines[i]) changes.push([i, next]);
+    }
+    if (!changes.length) return false;
+    const caret = currentCaret();
+    pushUndoSnapshot(true);
+    changes.forEach(([i, text]) => { state.lines[i] = text; });
+    rebuildEditor();
+    setCaret(caret.line, Math.min(caret.offset, state.lines[caret.line].length));
+    return true;
+  }
+
+  function rangeInLine(line, start, end) {
+    const lineEl = editorEl && editorEl.children[line];
+    if (!lineEl) return null;
+    const from = findTextPosition(lineEl, start);
+    const to = findTextPosition(lineEl, end);
+    const range = document.createRange();
+    range.setStart(from.node, from.offset);
+    range.setEnd(to.node, to.offset);
+    return range;
+  }
+
+  function replaceRanges(edits, replacement) {
+    if (!editorEl || state.view === 'preview' || !edits || !edits.length) return 0;
+    syncActiveLineFromDOM();
+    pushUndoSnapshot(true);
+    const text = String(replacement).replace(/\r\n|\r|\n/g, ' ');
+    for (let i = edits.length - 1; i >= 0; i -= 1) {
+      const edit = edits[i];
+      const current = state.lines[edit.line];
+      if (current === undefined) continue;
+      state.lines[edit.line] = current.slice(0, edit.start) + text + current.slice(edit.end);
+    }
+    rebuildEditor();
+    return edits.length;
+  }
+
+  function selectRange(line, start, end) {
+    if (!editorEl || state.view === 'preview') return;
+    const range = rangeInLine(line, start, end);
+    const lineEl = editorEl.children[line];
+    if (!range || !lineEl) return;
+    lineEl.focus({ preventScroll: true });
+    const sel = window.getSelection();
+    sel.removeAllRanges();
+    sel.addRange(range);
+  }
+
+  function domRangeAcrossLines(startLine, startOffset, endLine, endOffset) {
+    const startLineEl = editorEl.children[startLine];
+    const endLineEl = editorEl.children[endLine];
+    if (!startLineEl || !endLineEl) return null;
+    const from = findTextPosition(startLineEl, startOffset);
+    const to = findTextPosition(endLineEl, endOffset);
+    const range = document.createRange();
+    range.setStart(from.node, from.offset);
+    range.setEnd(to.node, to.offset);
+    return range;
+  }
+
+  function adjustPointAfterDeletion(point, delStart, delEnd) {
+    if (point.line < delStart.line || (point.line === delStart.line && point.offset <= delStart.offset)) {
+      return point;
+    }
+    if (point.line > delEnd.line || (point.line === delEnd.line && point.offset >= delEnd.offset)) {
+      if (point.line === delEnd.line) {
+        return { line: delStart.line, offset: delStart.offset + (point.offset - delEnd.offset) };
+      }
+      return { line: point.line - (delEnd.line - delStart.line), offset: point.offset };
+    }
+    return null;
+  }
+
+  let dropCursorEl = null;
+
+  function ensureDropCursor() {
+    if (dropCursorEl) return dropCursorEl;
+    dropCursorEl = document.createElement('div');
+    dropCursorEl.id = 'dropCursor';
+    document.body.appendChild(dropCursorEl);
+    return dropCursorEl;
+  }
+
+  function getClientRectForPoint(point) {
+    const lineEl = editorEl.children[point.line];
+    if (!lineEl) return null;
+    const pos = findTextPosition(lineEl, point.offset);
+    const range = document.createRange();
+    const maxOffset = pos.node.nodeType === Node.TEXT_NODE ? pos.node.textContent.length : pos.node.childNodes.length;
+    const safeOffset = Math.min(Math.max(0, pos.offset), maxOffset);
+    range.setStart(pos.node, safeOffset);
+    range.collapse(true);
+    const rect = range.getBoundingClientRect();
+    if (rect && rect.height) return rect;
+    return lineEl.getBoundingClientRect();
+  }
+
+  function showDropCursorAt(clientX, clientY) {
+    if (state.view === 'preview') { hideDropCursor(); return; }
+    const point = pointFromClient(clientX, clientY);
+    if (!point) { hideDropCursor(); return; }
+    const rect = getClientRectForPoint(point);
+    if (!rect) { hideDropCursor(); return; }
+    const el = ensureDropCursor();
+    el.style.left = `${rect.left}px`;
+    el.style.top = `${rect.top}px`;
+    el.style.height = `${rect.height || parseFloat(getComputedStyle(editorEl).lineHeight) || 20}px`;
+    el.style.display = 'block';
+  }
+
+  function hideDropCursor() {
+    if (dropCursorEl) dropCursorEl.style.display = 'none';
+  }
+
+  function lineElFromClientY(clientY) {
+    const children = editorEl.children;
+    for (let i = 0; i < children.length; i += 1) {
+      if (clientY < children[i].getBoundingClientRect().bottom) return children[i];
+    }
+    return children[children.length - 1] || null;
+  }
+
+  function pointFromClient(clientX, clientY) {
+    let range = null;
+    if (document.caretRangeFromPoint) {
+      range = document.caretRangeFromPoint(clientX, clientY);
+    } else if (document.caretPositionFromPoint) {
+      const pos = document.caretPositionFromPoint(clientX, clientY);
+      if (pos) {
+        range = document.createRange();
+        range.setStart(pos.offsetNode, pos.offset);
+        range.collapse(true);
+      }
+    }
+    const lineEl = range ? getClosestLine(range.startContainer) : null;
+    if (lineEl) {
+      return { line: Number(lineEl.dataset.index), offset: getOffsetAtBoundary(lineEl, range.startContainer, range.startOffset) };
+    }
+    const fallbackLineEl = lineElFromClientY(clientY);
+    if (!fallbackLineEl) return null;
+    return { line: Number(fallbackLineEl.dataset.index), offset: readLineText(fallbackLineEl).length };
+  }
+
+  // Ctrl+' (acute), Ctrl+` (grave), Ctrl+; (macron): press the shortcut, release, then type a letter.
+  const ACCENT_TRIGGERS = [
+    { shift: false, keys: ["'"], codes: ['Quote'], mark: '\u0301', map: { d: '\u00f0', D: '\u00d0' } },
+    { shift: false, keys: ['`'], codes: ['Backquote'], mark: '\u0300' },
+    { shift: false, keys: [';'], codes: ['Semicolon'], mark: '\u0308' },
+    { shift: true, keys: [':'], codes: ['Semicolon'], mark: '\u0308' },
+    { shift: true, keys: ['^'], codes: ['Digit6'], mark: '\u0302' },
+    { shift: true, keys: ['~'], codes: ['Backquote'], mark: '\u0303' },
+    { shift: true, keys: ['@'], codes: ['Digit2'], map: { a: '\u00e5', A: '\u00c5' } },
+    { shift: false, keys: [','], codes: ['Comma'], map: { c: '\u00e7', C: '\u00c7' } },
+    { shift: false, keys: ['/'], codes: ['Slash'], map: { o: '\u00f8', O: '\u00d8' } },
+    { shift: true, keys: ['&'], codes: ['Digit7'], map: { o: '\u0153', O: '\u0152', a: '\u00e6', A: '\u00c6', s: '\u00df' } }
+  ];
+  const ACCENT_IGNORED_KEYS = ['Shift', 'Control', 'Alt', 'Meta', 'CapsLock', 'AltGraph', 'Dead'];
+  let pendingAccent = null;
+
+  function accentForEvent(event) {
+    return ACCENT_TRIGGERS.find((a) => a.shift === event.shiftKey && (a.keys.includes(event.key) || a.codes.includes(event.code))) || null;
   }
 
   function init() {
@@ -853,11 +1094,13 @@
     rebuildEditor();
 
     editorEl.addEventListener('focusout', () => {
+      pendingAccent = null;
       syncActiveLineFromDOM();
       updateCounts();
     });
 
     editorEl.addEventListener('mousedown', () => {
+      pendingAccent = null;
       syncActiveLineFromDOM();
       updateCounts();
     }, true);
@@ -936,10 +1179,82 @@
         return;
       }
 
+      if (isMod && event.altKey) {
+        pendingAccent = null;
+        if (event.shiftKey && (event.key === '?' || event.code === 'Slash')) {
+          event.preventDefault();
+          document.execCommand('insertText', false, '\u00bf');
+          return;
+        }
+        if (event.shiftKey && (event.key === '!' || event.code === 'Digit1')) {
+          event.preventDefault();
+          document.execCommand('insertText', false, '\u00a1');
+          return;
+        }
+        if (!event.shiftKey && event.key.toLowerCase() === 'e') {
+          event.preventDefault();
+          document.execCommand('insertText', false, '\u20ac');
+          return;
+        }
+      }
+
+      if (!isComposing && !event.isComposing) {
+        if (pendingAccent) {
+          const accent = pendingAccent;
+          if (ACCENT_IGNORED_KEYS.includes(event.key)) return;
+          pendingAccent = null;
+          if (!isMod && !event.altKey) {
+            let composed = null;
+            if (accent.map && Object.prototype.hasOwnProperty.call(accent.map, event.key)) {
+              composed = accent.map[event.key];
+            } else if (accent.mark && event.key.length === 1) {
+              const candidate = (event.key + accent.mark).normalize('NFC');
+              if (candidate.length === 1) composed = candidate;
+            }
+            if (composed) {
+              event.preventDefault();
+              document.execCommand('insertText', false, composed);
+              return;
+            }
+          }
+        }
+        if (isMod && !event.altKey) {
+          const accent = accentForEvent(event);
+          if (accent) {
+            event.preventDefault();
+            pendingAccent = accent;
+            return;
+          }
+        }
+      }
+
+      if (isMod && event.key === 'Tab') {
+        event.preventDefault();
+        return;
+      }
+
       if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Home', 'End', 'PageUp', 'PageDown'].includes(event.key)) {
         setTimeout(() => {
           syncActiveLineFromDOM();
         }, 0);
+      }
+
+      if (!isMod && !event.altKey && !event.shiftKey && (event.key === 'ArrowLeft' || event.key === 'ArrowRight')) {
+        const rawSel = window.getSelection();
+        if (rawSel && rawSel.rangeCount && !rawSel.isCollapsed) {
+          const range = rawSel.getRangeAt(0);
+          const startLineEl = getClosestLine(range.startContainer);
+          const endLineEl = getClosestLine(range.endContainer);
+          if (startLineEl && endLineEl) {
+            event.preventDefault();
+            const startPoint = { line: Number(startLineEl.dataset.index), offset: getOffsetAtBoundary(startLineEl, range.startContainer, range.startOffset) };
+            const endPoint = { line: Number(endLineEl.dataset.index), offset: getOffsetAtBoundary(endLineEl, range.endContainer, range.endOffset) };
+            const target = event.key === 'ArrowLeft' ? startPoint : endPoint;
+            setCaret(target.line, target.offset);
+            syncActiveLineFromDOM();
+            return;
+          }
+        }
       }
 
       const sel = window.getSelection();
@@ -949,6 +1264,33 @@
       const idx = Number(lineEl.dataset.index);
       const offset = getCaretOffsetInLine(lineEl);
       const currentText = readLineText(lineEl);
+
+      if (sel.isCollapsed && event.altKey && !isMod && event.key.toLowerCase() === 'x') {
+        if (event.shiftKey) {
+          const chars = Array.from(currentText.slice(0, offset));
+          const lastChar = chars[chars.length - 1];
+          if (lastChar) {
+            event.preventDefault();
+            pushUndoSnapshot(true);
+            const hex = lastChar.codePointAt(0).toString(16).toUpperCase().padStart(4, '0');
+            state.lines[idx] = currentText.slice(0, offset - lastChar.length) + hex + currentText.slice(offset);
+            redecorateLine(lineEl, idx);
+            setCaret(idx, offset - lastChar.length + hex.length);
+          }
+          return;
+        }
+        const match = currentText.slice(0, offset).match(/[0-9a-fA-F]{1,6}$/);
+        const codePoint = match ? parseInt(match[0], 16) : NaN;
+        if (match && codePoint <= 0x10ffff && !(codePoint >= 0xd800 && codePoint <= 0xdfff)) {
+          event.preventDefault();
+          pushUndoSnapshot(true);
+          const char = String.fromCodePoint(codePoint);
+          state.lines[idx] = currentText.slice(0, offset - match[0].length) + char + currentText.slice(offset);
+          redecorateLine(lineEl, idx);
+          setCaret(idx, offset - match[0].length + char.length);
+          return;
+        }
+      }
 
       if (!sel.isCollapsed && (event.key === 'Backspace' || event.key === 'Delete')) {
         event.preventDefault();
@@ -1105,6 +1447,83 @@
       }
     });
 
+    editorEl.addEventListener('dragstart', (event) => {
+      dragSource = null;
+      if (state.view === 'preview') return;
+      const sel = window.getSelection();
+      if (!sel || !sel.rangeCount || sel.isCollapsed) return;
+      const range = sel.getRangeAt(0);
+      const startLineEl = getClosestLine(range.startContainer);
+      const endLineEl = getClosestLine(range.endContainer);
+      if (!startLineEl || !endLineEl) return;
+      let start = { line: Number(startLineEl.dataset.index), offset: getOffsetAtBoundary(startLineEl, range.startContainer, range.startOffset) };
+      let end = { line: Number(endLineEl.dataset.index), offset: getOffsetAtBoundary(endLineEl, range.endContainer, range.endOffset) };
+      if (start.line > end.line || (start.line === end.line && start.offset > end.offset)) {
+        const swap = start;
+        start = end;
+        end = swap;
+      }
+      dragSource = { start, end };
+      try {
+        event.dataTransfer.setData('text/plain', sel.toString());
+      } catch (_err) { /* clipboard access unavailable */ }
+      event.dataTransfer.effectAllowed = 'copyMove';
+    });
+
+    editorEl.addEventListener('dragover', (event) => {
+      const types = event.dataTransfer ? Array.from(event.dataTransfer.types) : [];
+      if (types.includes('Files')) { hideDropCursor(); return; }
+      if (!types.includes('text/plain') && !dragSource) { hideDropCursor(); return; }
+      event.preventDefault();
+      if (event.dataTransfer) {
+        event.dataTransfer.dropEffect = event.ctrlKey ? 'copy' : (dragSource ? 'move' : 'copy');
+      }
+      showDropCursorAt(event.clientX, event.clientY);
+    });
+
+    editorEl.addEventListener('dragleave', (event) => {
+      if (!event.relatedTarget || !editorEl.contains(event.relatedTarget)) {
+        hideDropCursor();
+      }
+    });
+
+    editorEl.addEventListener('drop', (event) => {
+      hideDropCursor();
+      const dt = event.dataTransfer;
+      const types = dt ? Array.from(dt.types) : [];
+      if (types.includes('Files')) return;
+      if (state.view === 'preview') return;
+      const text = dt ? dt.getData('text/plain') : '';
+      if (!text) return;
+      event.preventDefault();
+      event.stopPropagation();
+
+      const target = pointFromClient(event.clientX, event.clientY);
+      if (!target) { dragSource = null; return; }
+
+      syncActiveLineFromDOM();
+
+      if (dragSource && !event.ctrlKey) {
+        const adjusted = adjustPointAfterDeletion(target, dragSource.start, dragSource.end);
+        if (!adjusted) { dragSource = null; return; }
+        pushUndoSnapshot(true);
+        const delRange = domRangeAcrossLines(dragSource.start.line, dragSource.start.offset, dragSource.end.line, dragSource.end.offset);
+        if (delRange) deleteSelectedLines(delRange);
+        const insertRange = domRangeAcrossLines(adjusted.line, adjusted.offset, adjusted.line, adjusted.offset);
+        if (insertRange) replaceSelection(insertRange, text);
+      } else {
+        pushUndoSnapshot(true);
+        const insertRange = domRangeAcrossLines(target.line, target.offset, target.line, target.offset);
+        if (insertRange) replaceSelection(insertRange, text);
+      }
+      dragSource = null;
+    });
+
+    editorEl.addEventListener('dragend', () => {
+      dragSource = null;
+      hideDropCursor();
+    });
+
     editorEl.addEventListener('paste', (event) => {
       if (state.view === 'preview') return;
       event.preventDefault();
@@ -1172,6 +1591,14 @@
     },
     undo: doUndo,
     redo: doRedo,
+    clearFormatting,
+    getLines() {
+      syncActiveLineFromDOM();
+      return state.lines.slice();
+    },
+    rangeInLine,
+    replaceRanges,
+    selectRange,
     getCaret: currentCaret,
     restoreFocus(caret) {
       if (!editorEl) return;
